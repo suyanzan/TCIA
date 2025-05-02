@@ -9,56 +9,81 @@ public class Program
 {
     public static void Main(string[] args)
     {
-        GeneticAlgorithm.RunCombined();
+        GeneticAlgorithm.RunMetaOptimized();
     }
 }
+
 public class GeneticAlgorithm
 {
     static FeedforwardNeuralNetwork fnn;
     static List<string> results = new List<string>();
+    static Random rnd = new Random();
+    static double[] minVals = new double[6], maxVals = new double[6];
 
-    public static void RunCombined()
+    public static void RunMetaOptimized()
     {
-        // 初始化 CSV 標題列
         results.Add("testK,populationSize,generations,mutationRate,crossoverRate,reproductionRate,randomRate,bestFitness,elapsedSeconds");
 
-        // 訓練資料準備：k 值為輸入，固定參數為目標輸出
         double[] kTrain = new double[99];
         double[][] paramTrain = new double[99][];
+
+        // Step 1: For each k, find best GA hyperparameters
         for (int i = 0; i < 99; i++)
         {
             double k = i + 2;
             kTrain[i] = k;
-            double popSize = 50 + k / 2;
-            double gens = 100;
-            double mutation = 0.01 + (k % 10) * 0.01;
-            double crossover = 0.6 + (k % 5) * 0.05;
-            double reproduction = 0.1;
-            double random = 0.02 + 0.01 * ((int)(k / 10) % 5);
+            double bestFitness = double.MinValue;
+            double[] bestParam = null;
 
-            paramTrain[i] = new double[] {
-                popSize,
-                gens,
-                mutation,
-                crossover,
-                reproduction,
-                random
-            }; // 固定超參數值
+            for (int trial = 0; trial < 5; trial++)//100為一般精度,比賽200~500
+            {
+                int popSize = rnd.Next(50, 201);
+                int gens = 100;
+                double mutation = rnd.NextDouble() * 0.2;
+                double crossover = 0.5 + rnd.NextDouble() * 0.5;
+                double reproduction = 0.05 + rnd.NextDouble() * 0.2;
+                double random = 0.01 + rnd.NextDouble() * 0.2;
+
+                SqrtChromosome.targetK = k;
+                var pop = run(new SqrtChromosome(), popSize, gens, mutation, crossover, reproduction, random);
+
+                if (pop[0].fitness > bestFitness)
+                {
+                    bestFitness = pop[0].fitness;
+                    bestParam = new double[] { popSize, gens, mutation, crossover, reproduction, random };
+                }
+            }
+
+            paramTrain[i] = bestParam;
         }
 
-        // 建立並訓練 FNN 神經網路
-        fnn = new FeedforwardNeuralNetwork(1, 12, 6);
-        fnn.Train(kTrain, paramTrain, 2000, 0.01); // epochs, learning rate
+        // Normalize paramTrain
+        for (int j = 0; j < 6; j++)
+        {
+            minVals[j] = double.MaxValue;
+            maxVals[j] = double.MinValue;
+            for (int i = 0; i < paramTrain.Length; i++)
+            {
+                if (paramTrain[i][j] < minVals[j]) minVals[j] = paramTrain[i][j];
+                if (paramTrain[i][j] > maxVals[j]) maxVals[j] = paramTrain[i][j];
+            }
+            for (int i = 0; i < paramTrain.Length; i++)
+                paramTrain[i][j] = (paramTrain[i][j] - minVals[j]) / (maxVals[j] - minVals[j] + 1e-8);
+        }
 
-        // 輸出 loss 記錄 CSV + 自動開啟
+        fnn = new FeedforwardNeuralNetwork(1, 24, 6);
+        fnn.Train(kTrain, paramTrain, 3000, 0.01);
         File.WriteAllLines("fnn_loss_log.csv", fnn.LossLog.ToArray());
-        System.Diagnostics.Process.Start("notepad.exe", "fnn_loss_log.csv");
+        Process.Start("notepad.exe", "fnn_loss_log.csv");
 
-        // 對每個 k 執行 GA 並記錄結果
+        // Step 3: Predict and reverse normalize
         for (int testK = 2; testK <= 100; testK++)
         {
-            // FNN 預測最佳 GA 參數
-            double[] bestParams = fnn.Predict(testK);
+            double[] normParams = fnn.Predict(testK);
+            double[] bestParams = new double[6];
+            for (int j = 0; j < 6; j++)
+                bestParams[j] = normParams[j] * (maxVals[j] - minVals[j]) + minVals[j];
+
             int populationSize = (int)Math.Round(bestParams[0]);
             int generations = (int)Math.Round(bestParams[1]);
             double mutationRate = Clamp(bestParams[2], 0, 1);
@@ -66,50 +91,33 @@ public class GeneticAlgorithm
             double reproductionRate = Clamp(bestParams[4], 0, 1);
             double randomRate = Clamp(bestParams[5], 0, 1);
 
-            // 顯示預測結果
-            Console.WriteLine("\nk={0} → pop={1}, gen={2}, mut={3:F2}, cross={4:F2}, repro={5:F2}, rand={6:F2}",
-                testK, populationSize, generations, mutationRate, crossoverRate, reproductionRate, randomRate);
+            Console.WriteLine($"k={testK} → pop={populationSize}, gen={generations}, mut={mutationRate:F2}, cross={crossoverRate:F2}, repro={reproductionRate:F2}, rand={randomRate:F2}");
 
-            // 指定 GA 要處理的目標平方數值
             SqrtChromosome.targetK = testK;
-
-            // 執行 GA 並測量耗時
             var stopwatch = Stopwatch.StartNew();
             var pop = run(new SqrtChromosome(), populationSize, generations, mutationRate, crossoverRate, reproductionRate, randomRate);
             stopwatch.Stop();
             double elapsedSeconds = stopwatch.Elapsed.TotalSeconds;
 
-            // 記錄執行結果至 CSV
-            string row = string.Format(
+            results.Add(string.Format(
                 "{0},{1},{2},{3:F4},{4:F4},{5:F4},{6:F4},{7:F4},{8:F2}",
-                testK, populationSize, generations, mutationRate, crossoverRate, reproductionRate, randomRate, pop[0].fitness, elapsedSeconds
-            );
-            results.Add(row);
+                testK, populationSize, generations, mutationRate, crossoverRate, reproductionRate, randomRate, pop[0].fitness, elapsedSeconds));
         }
 
-        // 寫入主結果 CSV 並自動開啟
         File.WriteAllLines("ga_fnn_results.csv", results.ToArray());
-        Console.WriteLine("\nCSV exported: ga_fnn_results.csv and fnn_loss_log.csv");
-        System.Diagnostics.Process.Start("notepad.exe", "ga_fnn_results.csv");
+        Process.Start("notepad.exe", "ga_fnn_results.csv");
     }
 
-    // 執行一輪 GA
     public static Population run(Chromosome prototype, int size, int maxGen, double mutationRate, double crossoverRate, double reproductionRate, double randomRate)
     {
         Population pop = new Population(mutationRate, crossoverRate, reproductionRate, randomRate);
         pop.initialize(prototype, size);
         for (int genIdx = 0; genIdx < maxGen; genIdx++)
-        {
             pop = pop.reproduction(prototype, size);
-        }
         return pop;
     }
 
-    // 避免超出 0~1 區間
-    public static double Clamp(double val, double min, double max)
-    {
-        return Math.Max(min, Math.Min(max, val));
-    }
+    public static double Clamp(double val, double min, double max) => Math.Max(min, Math.Min(max, val));
 }
 
 // Modified FNN with loss log

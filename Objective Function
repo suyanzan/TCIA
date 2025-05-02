@@ -1,0 +1,46 @@
+using System;
+
+namespace ObjectiveFunctionDemo
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            // 範例測試數據
+            double y1 = 0.9;
+            double y2 = 3.0;
+
+            double objectiveScore = CalculateObjective(y1, y2);
+            Console.WriteLine("Objective Score: " + objectiveScore.ToString("F4"));
+        }
+
+        /// <summary>
+        /// 計算目標函數 (值越高越好)
+        /// </summary>
+        /// <param name="y1">範圍為 0~1, 最佳值為 0.9</param>
+        /// <param name="y2">範圍為 0~30, 最佳值為小於等於 3</param>
+        /// <returns>目標分數</returns>
+        static double CalculateObjective(double y1, double y2)
+        {
+            double f1 = 1.0 - Math.Abs(y1 - 0.9) / 0.9;
+
+            double f2;
+            if (y2 <= 3.0)
+            {
+                f2 = 1.0;
+            }
+            else
+            {
+                // 使用 sigmoid 平滑遞減轉換
+                f2 = 1.0 / (1.0 + Math.Exp((y2 - 3.0) / 2.0));
+            }
+
+            // 權重加總 (均等權重)
+            double weight1 = 0.5;
+            double weight2 = 0.5;
+
+            double objective = weight1 * f1 + weight2 * f2;
+            return objective;
+        }
+    }
+}

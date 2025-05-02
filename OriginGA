@@ -1,0 +1,131 @@
+using System;
+using System.Collections.Generic;
+
+public class GeneticAlgorithm
+{
+    static void Main(string[] args)
+    {
+        run(new SqrtChromosome(), 100, 100);
+    }
+
+    public static void run(Chromosome prototype, int size, int maxGen)
+    {
+        Population pop = new Population();
+        pop.initialize(prototype, size);
+        for (int genIdx = 0; genIdx < maxGen; genIdx++)
+        {
+            pop = pop.reproduction();
+            Console.WriteLine("================Population {0}================", genIdx);
+            pop.print();
+        }
+    }
+}
+
+public class Population : List<Chromosome> {
+  static Random random = new Random(7);
+  double mutationRate = 0.0;
+
+  public void initialize(Chromosome prototype, int popSize) {
+    this.Clear();
+    for (int i=0; i<popSize; i++) {
+      Chromosome newChrom = prototype.randomInstance();
+      newChrom.calcFitness();
+      this.Add(newChrom);
+    }
+  }
+
+  public Chromosome selection() {
+    int shoot  = random.Next((Count*Count) / 2);
+    int select = (int) Math.Floor(Math.Sqrt(shoot*2));
+    return (Chromosome) this[select];
+  }
+
+  private static int compare(Chromosome a, Chromosome b)
+  {
+      if (a.fitness > b.fitness) return 1;
+      else if (a.fitness < b.fitness) return -1;
+      else return 0;
+  }
+
+  public Population reproduction()
+  {
+      this.Sort(compare);
+      Population newPop = new Population();
+      for (int i = 0; i < Count; i++)
+      {
+          Chromosome parent1 = selection();
+          Chromosome parent2 = selection();
+          Chromosome child = parent1.crossover(parent2);
+          double prob = random.NextDouble();
+          if (prob < mutationRate) child.mutate();
+          child.calcFitness();
+          newPop.Add(child);
+      }
+      newPop.Sort(compare);
+      return newPop;
+  }
+
+  public void print()
+  {
+      int i=1;
+      foreach (Chromosome c in this)
+      {
+          Console.WriteLine("{0:##} : {1}", i, c.ToString());
+          i++;
+      }
+  }
+}
+
+public abstract class Chromosome {
+  public double fitness;
+  abstract public double calcFitness();
+  abstract public Chromosome crossover(Chromosome spouse);
+  abstract public void mutate();
+  abstract public Chromosome randomInstance();
+}
+
+public class SqrtChromosome : Chromosome
+{
+    public static Random random = new Random(7);
+
+    public string value;
+    public double k = 2;
+
+    public override double calcFitness()
+    {
+        double x = double.Parse(value);
+        fitness = -1 * Math.Abs(x * x - k);
+        return fitness;
+    }
+
+    public override Chromosome crossover(Chromosome spouse)
+    {
+        SqrtChromosome ss = spouse as SqrtChromosome;
+        int cutIdx = random.Next(value.Length);
+        String head = value.Substring(0, cutIdx);
+        String tail = ss.value.Substring(cutIdx);
+        SqrtChromosome child = new SqrtChromosome();
+        child.value = head + tail;
+        return child;
+    }
+
+    public override void mutate()
+    {
+        double v = double.Parse(value);
+        v += random.NextDouble() - 0.5;
+        value = String.Format("{0:00.0000}", v);
+    }
+
+    public override Chromosome randomInstance()
+    {
+        SqrtChromosome chrom = new SqrtChromosome();
+        double v = random.NextDouble() * 10;
+        chrom.value = String.Format("{0:00.0000}", v);
+        return chrom;
+    }
+
+    public override string ToString()
+    {
+        return String.Format("chromosome={0} fitness={1:F4}", value, fitness);
+    }
+}

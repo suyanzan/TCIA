@@ -1,0 +1,214 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+
+public class GeneticAlgorithm
+{
+    static void Main(string[] args)
+    {
+        int populationSize = 100;
+        int generations = 100;
+        double mutationRate = 0.05;
+        double crossoverRate = 0.8;
+        double reproductionRate = 0.1;
+        double randomRate = 0.05;
+
+        run(new SqrtChromosome(), populationSize, generations, mutationRate, crossoverRate, reproductionRate, randomRate);
+    }
+
+    public static void run(Chromosome prototype, int size, int maxGen, double mutationRate, double crossoverRate, double reproductionRate, double randomRate)
+    {
+        Population pop = new Population(mutationRate, crossoverRate, reproductionRate, randomRate);
+        pop.initialize(prototype, size);
+        for (int genIdx = 0; genIdx < maxGen; genIdx++)
+        {
+            pop = pop.reproduction(prototype, size);
+            Console.WriteLine("=== Generation {0} ===", genIdx);
+            pop.print();
+        }
+    }
+}
+
+public class Population : List<Chromosome>
+{
+    static Random random = new Random(7);
+    double mutationRate, crossoverRate, reproductionRate, randomRate;
+
+    public Population() { }
+
+    public Population(double mutationRate, double crossoverRate, double reproductionRate, double randomRate)
+    {
+        this.mutationRate = mutationRate;
+        this.crossoverRate = crossoverRate;
+        this.reproductionRate = reproductionRate;
+        this.randomRate = randomRate;
+    }
+
+    public void initialize(Chromosome prototype, int popSize)
+    {
+        this.Clear();
+        while (this.Count < popSize)
+        {
+            try
+            {
+                Chromosome c = prototype.randomInstance();
+                c.calcFitness();
+                this.Add(c);
+            }
+            catch { } // 忽略錯誤個體
+        }
+    }
+
+    public Chromosome selection()
+    {
+        int shoot = random.Next((Count * Count) / 2);
+        int select = (int)Math.Floor(Math.Sqrt(shoot * 2));
+        return this[select];
+    }
+
+    private static int compare(Chromosome a, Chromosome b)
+    {
+        return a.fitness.CompareTo(b.fitness);
+    }
+
+    public Population reproduction(Chromosome prototype, int targetSize)
+    {
+        this.Sort(compare);
+        Population newPop = new Population(mutationRate, crossoverRate, reproductionRate, randomRate);
+
+        int eliteCount = (int)(targetSize * reproductionRate);
+        int crossoverCount = (int)(targetSize * crossoverRate);
+        int randomCount = (int)(targetSize * randomRate);
+
+        for (int i = 0; i < eliteCount && i < this.Count; i++)
+        {
+            newPop.Add(this[i]);
+        }
+
+        while (newPop.Count < eliteCount + crossoverCount)
+        {
+            try
+            {
+                Chromosome p1 = selection();
+                Chromosome p2 = selection();
+                Chromosome child = p1.crossover(p2);
+                if (random.NextDouble() < mutationRate)
+                    child.mutate();
+                child.calcFitness();
+                newPop.Add(child);
+            }
+            catch { }
+        }
+
+        while (newPop.Count < eliteCount + crossoverCount + randomCount)
+        {
+            try
+            {
+                Chromosome rand = prototype.randomInstance();
+                rand.calcFitness();
+                newPop.Add(rand);
+            }
+            catch { }
+        }
+
+        while (newPop.Count < targetSize)
+        {
+            try
+            {
+                Chromosome p1 = selection();
+                Chromosome p2 = selection();
+                Chromosome child = p1.crossover(p2);
+                if (random.NextDouble() < mutationRate)
+                    child.mutate();
+                child.calcFitness();
+                newPop.Add(child);
+            }
+            catch { }
+        }
+
+        newPop.Sort(compare);
+        return newPop;
+    }
+
+    public void print()
+    {
+        int i = 1;
+        foreach (Chromosome c in this)
+        {
+            Console.WriteLine("{0:00}: {1}", i++, c.ToString());
+        }
+    }
+}
+
+public abstract class Chromosome
+{
+    public double fitness;
+    public abstract double calcFitness();
+    public abstract Chromosome crossover(Chromosome spouse);
+    public abstract void mutate();
+    public abstract Chromosome randomInstance();
+}
+
+public class SqrtChromosome : Chromosome
+{
+    public static Random random = new Random(7);
+    public string value;
+    public double k = 2;
+
+    public override double calcFitness()
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            throw new FormatException("value is empty");
+
+        double x;
+        if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out x))
+            throw new FormatException("Invalid number format: " + value);
+
+        fitness = 1.0 / (1.0 + Math.Abs(x * x - k));
+        return fitness;
+    }
+
+    public override Chromosome crossover(Chromosome spouse)
+    {
+        SqrtChromosome ss = spouse as SqrtChromosome;
+
+        if (string.IsNullOrEmpty(this.value) || string.IsNullOrEmpty(ss.value))
+            throw new Exception("Empty value in crossover");
+
+        int minLength = Math.Min(this.value.Length, ss.value.Length);
+        if (minLength < 2)
+            return this; // 回傳本身避免錯誤
+
+        int cutIdx = random.Next(1, minLength); // 最少切一位
+        string head = this.value.Substring(0, cutIdx);
+        string tail = (cutIdx < ss.value.Length) ? ss.value.Substring(cutIdx) : "";
+
+        SqrtChromosome child = new SqrtChromosome();
+        child.value = head + tail;
+        return child;
+    }
+
+    public override void mutate()
+    {
+        double v;
+        if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out v))
+            throw new FormatException("Mutation parse error: " + value);
+
+        v += random.NextDouble() - 0.5;
+        value = v.ToString("F4", CultureInfo.InvariantCulture);
+    }
+
+    public override Chromosome randomInstance()
+    {
+        SqrtChromosome chrom = new SqrtChromosome();
+        double v = random.NextDouble() * 10;
+        chrom.value = v.ToString("F4", CultureInfo.InvariantCulture);
+        return chrom;
+    }
+
+    public override string ToString()
+    {
+        return string.Format("chromosome={0} fitness={1:F4}", value, fitness);
+    }
+}
+

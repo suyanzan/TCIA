@@ -1,0 +1,403 @@
+// Full GA + FNN integration — all classes included, no duplicate entry point
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+
+public class Program
+{
+    public static void Main(string[] args)
+    {
+        GeneticAlgorithm.RunCombined();
+    }
+}
+public class GeneticAlgorithm
+{
+    static FeedforwardNeuralNetwork fnn;
+    static List<string> results = new List<string>();
+
+    public static void RunCombined()
+    {
+        // 初始化 CSV 標題列
+        results.Add("testK,populationSize,generations,mutationRate,crossoverRate,reproductionRate,randomRate,bestFitness,elapsedSeconds");
+
+        // 訓練資料準備：k 值為輸入，固定參數為目標輸出
+        double[] kTrain = new double[99];
+        double[][] paramTrain = new double[99][];
+        for (int i = 0; i < 99; i++)
+        {
+            double k = i + 2;
+            kTrain[i] = k;
+            double popSize = 50 + k / 2;
+            double gens = 100;
+            double mutation = 0.01 + (k % 10) * 0.01;
+            double crossover = 0.6 + (k % 5) * 0.05;
+            double reproduction = 0.1;
+            double random = 0.02 + 0.01 * ((int)(k / 10) % 5);
+
+            paramTrain[i] = new double[] {
+                popSize,
+                gens,
+                mutation,
+                crossover,
+                reproduction,
+                random
+            }; // 固定超參數值
+        }
+
+        // 建立並訓練 FNN 神經網路
+        fnn = new FeedforwardNeuralNetwork(1, 12, 6);
+        fnn.Train(kTrain, paramTrain, 2000, 0.01); // epochs, learning rate
+
+        // 輸出 loss 記錄 CSV + 自動開啟
+        File.WriteAllLines("fnn_loss_log.csv", fnn.LossLog.ToArray());
+        System.Diagnostics.Process.Start("notepad.exe", "fnn_loss_log.csv");
+
+        // 對每個 k 執行 GA 並記錄結果
+        for (int testK = 2; testK <= 100; testK++)
+        {
+            // FNN 預測最佳 GA 參數
+            double[] bestParams = fnn.Predict(testK);
+            int populationSize = (int)Math.Round(bestParams[0]);
+            int generations = (int)Math.Round(bestParams[1]);
+            double mutationRate = Clamp(bestParams[2], 0, 1);
+            double crossoverRate = Clamp(bestParams[3], 0, 1);
+            double reproductionRate = Clamp(bestParams[4], 0, 1);
+            double randomRate = Clamp(bestParams[5], 0, 1);
+
+            // 顯示預測結果
+            Console.WriteLine("\nk={0} → pop={1}, gen={2}, mut={3:F2}, cross={4:F2}, repro={5:F2}, rand={6:F2}",
+                testK, populationSize, generations, mutationRate, crossoverRate, reproductionRate, randomRate);
+
+            // 指定 GA 要處理的目標平方數值
+            SqrtChromosome.targetK = testK;
+
+            // 執行 GA 並測量耗時
+            var stopwatch = Stopwatch.StartNew();
+            var pop = run(new SqrtChromosome(), populationSize, generations, mutationRate, crossoverRate, reproductionRate, randomRate);
+            stopwatch.Stop();
+            double elapsedSeconds = stopwatch.Elapsed.TotalSeconds;
+
+            // 記錄執行結果至 CSV
+            string row = string.Format(
+                "{0},{1},{2},{3:F4},{4:F4},{5:F4},{6:F4},{7:F4},{8:F2}",
+                testK, populationSize, generations, mutationRate, crossoverRate, reproductionRate, randomRate, pop[0].fitness, elapsedSeconds
+            );
+            results.Add(row);
+        }
+
+        // 寫入主結果 CSV 並自動開啟
+        File.WriteAllLines("ga_fnn_results.csv", results.ToArray());
+        Console.WriteLine("\nCSV exported: ga_fnn_results.csv and fnn_loss_log.csv");
+        System.Diagnostics.Process.Start("notepad.exe", "ga_fnn_results.csv");
+    }
+
+    // 執行一輪 GA
+    public static Population run(Chromosome prototype, int size, int maxGen, double mutationRate, double crossoverRate, double reproductionRate, double randomRate)
+    {
+        Population pop = new Population(mutationRate, crossoverRate, reproductionRate, randomRate);
+        pop.initialize(prototype, size);
+        for (int genIdx = 0; genIdx < maxGen; genIdx++)
+        {
+            pop = pop.reproduction(prototype, size);
+        }
+        return pop;
+    }
+
+    // 避免超出 0~1 區間
+    public static double Clamp(double val, double min, double max)
+    {
+        return Math.Max(min, Math.Min(max, val));
+    }
+}
+
+// Modified FNN with loss log
+// Feedforward Neural Network 類別 + 記錄 loss 註解
+public class FeedforwardNeuralNetwork
+{
+    private int inputSize, hiddenSize, outputSize;
+    private double[,] w1, w2; // W1: input→hidden, W2: hidden→output
+    private double[] b1, b2;  // bias
+    private Random rnd = new Random();
+    public List<string> LossLog = new List<string>();
+
+    public FeedforwardNeuralNetwork(int inputSize, int hiddenSize, int outputSize)
+    {
+        this.inputSize = inputSize;
+        this.hiddenSize = hiddenSize;
+        this.outputSize = outputSize;
+        w1 = new double[inputSize, hiddenSize];
+        w2 = new double[hiddenSize, outputSize];
+        b1 = new double[hiddenSize];
+        b2 = new double[outputSize];
+        InitWeights();
+        LossLog.Add("epoch,loss");
+    }
+
+    private void InitWeights()
+    {
+        for (int i = 0; i < inputSize; i++)
+            for (int j = 0; j < hiddenSize; j++)
+                w1[i, j] = rnd.NextDouble() * 2 - 1;
+        for (int i = 0; i < hiddenSize; i++)
+            for (int j = 0; j < outputSize; j++)
+                w2[i, j] = rnd.NextDouble() * 2 - 1;
+    }
+
+    private double Sigmoid(double x) => 1.0 / (1.0 + Math.Exp(-x));
+    private double dSigmoid(double y) => y * (1 - y);
+
+    // 前向預測
+    public double[] Predict(double x)
+    {
+        double[] hidden = new double[hiddenSize];
+        for (int i = 0; i < hiddenSize; i++)
+        {
+            hidden[i] = b1[i] + w1[0, i] * x;
+            hidden[i] = Sigmoid(hidden[i]);
+        }
+
+        double[] output = new double[outputSize];
+        for (int o = 0; o < outputSize; o++)
+        {
+            output[o] = b2[o];
+            for (int h = 0; h < hiddenSize; h++)
+                output[o] += w2[h, o] * hidden[h];
+        }
+        return output;
+    }
+
+    // 反向傳播訓練
+    public void Train(double[] inputs, double[][] targets, int epochs, double lr)
+    {
+        for (int epoch = 0; epoch < epochs; epoch++)
+        {
+            for (int i = 0; i < inputs.Length; i++)
+            {
+                double x = inputs[i];
+                double[] target = targets[i];
+
+                // Forward: input → hidden
+                double[] hidden = new double[hiddenSize];
+                for (int j = 0; j < hiddenSize; j++)
+                {
+                    hidden[j] = b1[j] + w1[0, j] * x;
+                    hidden[j] = Sigmoid(hidden[j]);
+                }
+
+                // Forward: hidden → output
+                double[] output = new double[outputSize];
+                for (int o = 0; o < outputSize; o++)
+                {
+                    output[o] = b2[o];
+                    for (int j = 0; j < hiddenSize; j++)
+                        output[o] += w2[j, o] * hidden[j];
+                }
+
+                // 誤差: output vs target
+                double[] error = new double[outputSize];
+                for (int o = 0; o < outputSize; o++)
+                    error[o] = target[o] - output[o];
+
+                // 更新輸出層權重/偏差 (W2, B2)
+                for (int o = 0; o < outputSize; o++)
+                {
+                    for (int j = 0; j < hiddenSize; j++)
+                        w2[j, o] += lr * error[o] * hidden[j];
+                    b2[o] += lr * error[o];
+                }
+
+                // 更新隱藏層權重/偏差 (W1, B1)
+                for (int j = 0; j < hiddenSize; j++)
+                {
+                    double dh = 0;
+                    for (int o = 0; o < outputSize; o++)
+                        dh += error[o] * w2[j, o];
+                    dh *= dSigmoid(hidden[j]);
+                    w1[0, j] += lr * dh * x;
+                    b1[j] += lr * dh;
+                }
+            }
+
+            // 每 100 回合記錄一次 Loss（總平方差）
+            if (epoch % 100 == 0)
+            {
+                double totalLoss = 0;
+                for (int i = 0; i < inputs.Length; i++)
+                {
+                    var pred = Predict(inputs[i]);
+                    for (int o = 0; o < outputSize; o++)
+                        totalLoss += Math.Pow(pred[o] - targets[i][o], 2);
+                }
+                string logLine = string.Format("{0},{1:F4}", epoch, totalLoss);
+                Console.WriteLine("Epoch {0}: Loss = {1:F4}", epoch, totalLoss);
+                LossLog.Add(logLine);
+            }
+        }
+    }
+}
+
+public class Population : List<Chromosome>
+{
+    static Random random = new Random(7);
+    double mutationRate, crossoverRate, reproductionRate, randomRate;
+
+    public Population(double mutationRate, double crossoverRate, double reproductionRate, double randomRate)
+    {
+        this.mutationRate = mutationRate;
+        this.crossoverRate = crossoverRate;
+        this.reproductionRate = reproductionRate;
+        this.randomRate = randomRate;
+    }
+
+    public void initialize(Chromosome prototype, int popSize)
+    {
+        this.Clear();
+        while (this.Count < popSize)
+        {
+            try
+            {
+                Chromosome c = prototype.randomInstance();
+                c.calcFitness();
+                this.Add(c);
+            }
+            catch { }
+        }
+    }
+
+    public Chromosome selection()
+    {
+        int shoot = random.Next((Count * Count) / 2);
+        int select = (int)Math.Floor(Math.Sqrt(shoot * 2));
+        return this[select];
+    }
+
+    private static int compare(Chromosome a, Chromosome b)
+    {
+        return b.fitness.CompareTo(a.fitness);
+    }
+
+    public Population reproduction(Chromosome prototype, int targetSize)
+    {
+        this.Sort(compare);
+        Population newPop = new Population(mutationRate, crossoverRate, reproductionRate, randomRate);
+
+        int eliteCount = (int)(targetSize * reproductionRate);
+        int crossoverCount = (int)(targetSize * crossoverRate);
+        int randomCount = (int)(targetSize * randomRate);
+
+        for (int i = 0; i < eliteCount && i < this.Count; i++)
+            newPop.Add(this[i]);
+
+        while (newPop.Count < eliteCount + crossoverCount)
+        {
+            try
+            {
+                Chromosome p1 = selection();
+                Chromosome p2 = selection();
+                Chromosome child = p1.crossover(p2);
+                if (random.NextDouble() < mutationRate)
+                    child.mutate();
+                child.calcFitness();
+                newPop.Add(child);
+            }
+            catch { }
+        }
+
+        while (newPop.Count < eliteCount + crossoverCount + randomCount)
+        {
+            try
+            {
+                Chromosome rand = prototype.randomInstance();
+                rand.calcFitness();
+                newPop.Add(rand);
+            }
+            catch { }
+        }
+
+        while (newPop.Count < targetSize)
+        {
+            try
+            {
+                Chromosome p1 = selection();
+                Chromosome p2 = selection();
+                Chromosome child = p1.crossover(p2);
+                if (random.NextDouble() < mutationRate)
+                    child.mutate();
+                child.calcFitness();
+                newPop.Add(child);
+            }
+            catch { }
+        }
+
+        newPop.Sort(compare);
+        return newPop;
+    }
+}
+
+public abstract class Chromosome
+{
+    public double fitness;
+    public abstract double calcFitness();
+    public abstract Chromosome crossover(Chromosome spouse);
+    public abstract void mutate();
+    public abstract Chromosome randomInstance();
+}
+
+public class SqrtChromosome : Chromosome
+{
+    public static Random random = new Random(7);
+    public static double targetK = 2;
+    public string value;
+
+    public override double calcFitness()
+    {
+        double x;
+        if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out x))
+            throw new FormatException("Invalid value format: " + value);
+
+        double error = Math.Abs(x * x - targetK);
+        fitness = 1.0 / (1.0 + error);
+        return fitness;
+    }
+
+    public override Chromosome crossover(Chromosome spouse)
+    {
+        SqrtChromosome ss = spouse as SqrtChromosome;
+        int minLength = Math.Min(this.value.Length, ss.value.Length);
+        if (minLength < 2) return this;
+
+        int cutIdx = random.Next(1, minLength);
+        string head = this.value.Substring(0, cutIdx);
+        string tail = (cutIdx < ss.value.Length) ? ss.value.Substring(cutIdx) : "";
+
+        SqrtChromosome child = new SqrtChromosome();
+        child.value = head + tail;
+        return child;
+    }
+
+    public override void mutate()
+    {
+        double v;
+        if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out v))
+            throw new FormatException("Mutation parse error: " + value);
+
+        v += random.NextDouble() - 0.5;
+        value = v.ToString("F4", CultureInfo.InvariantCulture);
+    }
+
+    public override Chromosome randomInstance()
+    {
+        SqrtChromosome chrom = new SqrtChromosome();
+        double v = random.NextDouble() * 10;
+        chrom.value = v.ToString("F4", CultureInfo.InvariantCulture);
+        return chrom;
+    }
+
+    public override string ToString()
+    {
+        return string.Format("chromosome={0} fitness={1:F4}", value, fitness);
+    }
+}
+

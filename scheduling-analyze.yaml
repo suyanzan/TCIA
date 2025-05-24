@@ -1,0 +1,123 @@
+openapi: 3.1.0
+info:
+  title: Scheduling Analyze API
+  version: 1.0.0
+
+servers:
+  - url: https://your-api-host.com
+
+paths:
+  /Scheduling/Analyze:
+    post:
+      summary: 根據使用者輸入回傳月投放量或 OPC 工單與可使用量資訊
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                input_context:
+                  type: string
+                  description: 使用者輸入的問題，例如「查詢投放量」或「是否有延遲」
+                  example: "查詢投放量"
+      responses:
+        '200':
+          description: 根據情境回傳月投放量或 OPC 工單分析資料
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyzeResult'
+
+components:
+  schemas:
+
+    AnalyzeResult:
+      oneOf:
+        - $ref: '#/components/schemas/MonthlyInjectionResult'
+        - $ref: '#/components/schemas/OpcAndReticleData'
+
+    MonthlyInjectionResult:
+      type: object
+      required:
+        - type
+        - statistic_interval
+        - monthly_injection
+        - delay_days
+        - utilization_rate
+        - recommended_actions
+      properties:
+        type:
+          type: string
+          const: monthly_injection
+        statistic_interval:
+          type: string
+          description: 統計區間 (MM/dd~MM/dd)
+          example: "04/26~05/25"
+        monthly_injection:
+          type: integer
+          description: 建議月投放量
+          example: 2500
+        delay_days:
+          type: integer
+          description: 月內遞延天數
+          example: 4
+        utilization_rate:
+          type: string
+          description: 使用率 (百分比格式)
+          example: "88%"
+        recommended_actions:
+          type: array
+          description: 系統建議的行動
+          items:
+            type: string
+          example:
+            - "延遲天數超過3天，請與MP單位確認交期"
+            - "使用率低於90%，需注意OPC工作區後續安排"
+
+    OpcAndReticleData:
+      type: object
+      required:
+        - type
+        - opc_capacity
+        - reticle_orders
+      properties:
+        type:
+          type: string
+          const: opc_analysis
+        opc_capacity:
+          type: array
+          description: 每日 OPC 可用容量
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+                format: date
+              available_opc_capacity:
+                type: integer
+          example:
+            - date: "2025-05-24"
+              available_opc_capacity: 3100
+            - date: "2025-05-25"
+              available_opc_capacity: 3000
+        reticle_orders:
+          type: array
+          description: 光罩工單需求
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              due_date:
+                type: string
+                format: date
+              required_opc:
+                type: integer
+          example:
+            - id: "R-001"
+              due_date: "2025-05-25"
+              required_opc: 1800
+            - id: "R-002"
+              due_date: "2025-05-26"
+              required_opc: 1500

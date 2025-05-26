@@ -81,6 +81,7 @@ components:
         - type
         - opc_capacity
         - reticle_orders
+        - schedule_results
       properties:
         type:
           type: string
@@ -96,11 +97,6 @@ components:
                 format: date
               available_opc_capacity:
                 type: integer
-          example:
-            - date: "2025-05-24"
-              available_opc_capacity: 3100
-            - date: "2025-05-25"
-              available_opc_capacity: 3000
         reticle_orders:
           type: array
           description: 光罩工單需求
@@ -114,10 +110,28 @@ components:
                 format: date
               required_opc:
                 type: integer
-          example:
-            - id: "R-001"
-              due_date: "2025-05-25"
-              required_opc: 1800
-            - id: "R-002"
-              due_date: "2025-05-26"
-              required_opc: 1500
+        schedule_results:
+          $ref: '#/components/schemas/ScheduleResultList'
+
+    ScheduleResultList:
+      type: array
+      items:
+        $ref: '#/components/schemas/ScheduleResult'
+
+    ScheduleResult:
+      type: object
+      properties:
+        reticle_id:
+          type: string
+        due_date:
+          type: string
+          format: date
+        scheduled_date:
+          type: string
+          format: date
+        delayed:
+          type: string
+          enum: [Yes, No]
+        delay_days:
+          type: integer
+          description: 延遲天數 = max(預計完成日 − 交期, 0)

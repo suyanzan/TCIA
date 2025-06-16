@@ -1,3 +1,5 @@
+
+https://ithelp.ithome.com.tw/articles/10349538
 修改如下
 步驟  名稱                              節點類型              功能說明
 1.    調查目前OPC使用量下,遞延天數情形  HTTP Request          呼叫 /Analyze/CalDelayByCurOpc 取得REASA模擬遞延天數結果

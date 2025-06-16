@@ -1,0 +1,8 @@
+修改如下
+步驟  名稱                              節點類型              功能說明
+1.    調查目前OPC使用量下,遞延天數情形  HTTP Request          呼叫 /Analyze/CalDelayByCurOpc 取得REASA模擬遞延天數結果
+2.    遞延天數是否超過3天               條件判斷              Delay >=3 到步驟3.詢問是否評估月投放量   步驟5.Delay < 3 詢問是否有遞延
+3.    詢問使用者是否預估	        詢問使用者	      延遲嚴重則詢問是否執行預估月投放量
+4.    預估月投放量	                HTTP Request	      呼叫 /Analyze/MonthlyInjection 取得建議量與延遲天數
+5.    輕微遞延者			條件判斷	      {{delay_days}} > 0，若有才繼續重排
+6.    重新排程工單			HTTP Request	呼叫 /Analyze/RescheduleOrders，取得工單重新排程結果 

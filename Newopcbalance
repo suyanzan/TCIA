@@ -1,0 +1,356 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OPC Demand Balancing (D3.js | Fill All Gaps to Capacity)</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <style>
+    :root {
+      --bg: #0b1220; /* dark background */
+      --fg: #e8eefc;
+      --muted: #9fb3cc;
+      --barLow: #34d399;   /* below capacity */
+      --barHigh: #ef4444;  /* above capacity */
+      --line: #f59e0b;     /* capacity line */
+      --grid: #21314a;
+      --btn: #1f2a44;
+      --btnHover: #2c3e66;
+    }
+    body { margin: 0; background: var(--bg); color: var(--fg); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    header { padding: 20px 16px 8px; }
+    h1 { font-size: 18px; margin: 0 0 6px; color: var(--fg); font-weight: 600; }
+    p.sub { margin: 0; color: var(--muted); font-size: 12px; }
+    .wrap { padding: 12px 16px 24px; }
+    .panel { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px; }
+    button, select, input[type="number"] { background: var(--btn); color: var(--fg); border: 1px solid #2a3b5d; border-radius: 10px; padding: 8px 10px; cursor: pointer; font-size: 13px; }
+    button:hover { background: var(--btnHover); }
+    .info { font-size: 12px; color: var(--muted); margin-left: 8px; }
+    .chart-card { background: #0f1a2c; border: 1px solid #1c2b47; border-radius: 14px; padding: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.25); }
+    .legend { display: flex; gap: 14px; align-items: center; font-size: 12px; color: var(--muted); margin: 8px 2px 0; }
+    .dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+    .dot.low { background: var(--barLow); }
+    .dot.high { background: var(--barHigh); }
+    .dot.line { background: var(--line); }
+    .axis-label { fill: var(--muted); font-size: 12px; }
+    .axis text { fill: var(--fg); font-size: 11px; }
+    .axis path, .axis line { stroke: var(--grid); }
+    .grid line { stroke: var(--grid); }
+    .capacity-label { fill: var(--line); font-size: 11px; font-weight: 600; }
+    .tooltip { position: absolute; pointer-events: none; background: #0e1726; color: var(--fg); border: 1px solid #223453; padding: 6px 8px; border-radius: 8px; font-size: 12px; opacity: 0; transform: translate(-50%, -130%); white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>OPC Demand Balancing (Date × Licenses)</h1>
+    <p class="sub">Y axis: License count | X axis: Date. Each rectangle is daily OPC demand. Click <b>“Start Balancing”</b> to redistribute from above-capacity days to under-capacity days until <b>every day exactly reaches the capacity line</b>. Before playback, total demand is scaled so that <i>Total = Days × Capacity</i> to guarantee a perfect flat line outcome.</p>
+  </header>  <div class="wrap">
+    <div class="panel">
+      <label>Capacity (horizontal line)
+        <input id="capacityInput" type="number" value="50" min="1" max="10000" step="1" style="width: 90px; margin-left: 6px;" />
+      </label>
+      <label style="margin-left: 10px;">Days
+        <select id="daysSelect">
+          <option value="7">7</option>
+          <option value="14" selected>14</option>
+          <option value="21">21</option>
+          <option value="30">30</option>
+        </select>
+      </label>
+      <button id="btnRandom">Generate random demand</button>
+      <button id="btnPlay">Start balancing</button>
+      <button id="btnReset">Reset</button>
+      <span class="info" id="status">Status: idle</span>
+    </div><div class="chart-card">
+  <svg id="chart" viewBox="0 0 960 460" preserveAspectRatio="xMidYMid meet"></svg>
+  <div class="legend">
+    <span class="dot high"></span> Above capacity
+    <span class="dot low"></span> Below capacity
+    <span class="dot line"></span> OPC capacity (horizontal line)
+  </div>
+</div>
+
+  </div>  <div id="tooltip" class="tooltip"></div>  <script>
+  // ======== Animation parameters ========
+  const TRANSITION_MS = 550;   // per-step duration
+  const STEPS = 48;            // max steps
+  const REDIST_FACTOR = 0.9;   // smoothing factor to avoid oscillation
+
+  // ======== Helpers ========
+  const fmtDate = d3.timeFormat("%m/%d");
+
+  function makeSequentialDates(n, startDate = new Date()) {
+    const d0 = new Date(startDate);
+    d0.setHours(0,0,0,0);
+    return d3.range(n).map(i => {
+      const d = new Date(d0);
+      d.setDate(d0.getDate() + i);
+      return d;
+    });
+  }
+
+  // random demands with total exactly = capacity × days
+  function genRandomDemands(n, capacity) {
+    const base = d3.range(n).map(() => Math.max(0.2, d3.randomLogNormal(0.3, 0.7)()));
+    const wavy = base.map(v => v * d3.randomUniform(0.6, 1.6)());
+    const sum = d3.sum(wavy);
+    const target = capacity * n;
+    return wavy.map(v => v * target / sum);
+  }
+
+  // Build frames to fill ALL gaps to capacity (requires total = capacity × n)
+  function makeFrames(initial, capacity, steps = STEPS) {
+    const frames = [initial.map(d => d)];
+    let curr = initial.map(d => d);
+    const n = curr.length;
+    const EPS = 1e-6;
+
+    for (let s = 0; s < steps; s++) {
+      const next = curr.slice();
+      const overIdx = d3.range(n).filter(i => curr[i] - capacity > EPS);
+      const underIdx = d3.range(n).filter(i => capacity - curr[i] > EPS);
+
+      if (overIdx.length === 0 && underIdx.length === 0) break;
+      if (overIdx.length === 0 || underIdx.length === 0) {
+        for (let i = 0; i < n; i++) next[i] = Math.min(capacity, Math.max(0, next[i]));
+        curr = next; frames.push(curr.map(d => d)); break;
+      }
+
+      // Prioritize the most over-capacity bars
+      overIdx.sort((a,b) => (curr[b] - capacity) - (curr[a] - capacity));
+
+      for (const i of overIdx) {
+        let surplus = curr[i] - capacity;
+        if (surplus <= EPS) continue;
+        surplus *= REDIST_FACTOR;
+
+        // Distribute to all holes, weighted by (space × 1/distance)
+        const holes = underIdx.filter(j => curr[j] < capacity - EPS);
+        if (holes.length === 0) break;
+
+        const spaces = holes.map(j => capacity - curr[j]);
+        const dists  = holes.map(j => Math.abs(j - i) + 1);
+        const invDist = dists.map(d => 1 / d);
+        const weights = holes.map((_, k) => spaces[k] * invDist[k]);
+        const W = d3.sum(weights);
+        if (W <= EPS) continue;
+
+        const move = Math.min(surplus, d3.sum(spaces));
+        holes.forEach((j, k) => {
+          const portion = move * (weights[k] / W);
+          next[j] += portion;
+          next[i] -= portion;
+        });
+      }
+
+      for (let i = 0; i < n; i++) next[i] = Math.max(0, next[i]);
+      curr = next; frames.push(curr.map(d => d));
+
+      const maxDev = d3.max(curr.map(v => Math.abs(v - capacity)));
+      if (maxDev < Math.max(1, capacity * 0.001)) {
+        curr = curr.map(() => capacity);
+        frames.push(curr.map(d => d));
+        break;
+      }
+    }
+    return frames;
+  }
+
+  // ======== Chart setup ========
+  const svg = d3.select('#chart');
+  const W = 960, H = 460;
+  const margin = { top: 24, right: 24, bottom: 64, left: 64 };
+  const innerW = W - margin.left - margin.right;
+  const innerH = H - margin.top - margin.bottom;
+
+  const g = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+  const xAxisG = g.append('g').attr('class', 'axis').attr('transform', `translate(0,${innerH})`);
+  const yAxisG = g.append('g').attr('class', 'axis');
+  const gridG  = g.append('g').attr('class', 'grid');
+  const barsG  = g.append('g');
+  const capacityG = g.append('g');
+
+  g.append('text').attr('class', 'axis-label').attr('x', innerW/2).attr('y', innerH + 48).attr('text-anchor', 'middle').text('Date');
+  g.append('text').attr('class', 'axis-label').attr('x', -innerH/2).attr('y', -46).attr('transform', 'rotate(-90)').attr('text-anchor', 'middle').text('Licenses');
+
+  const tooltip = d3.select('#tooltip');
+
+  let state = {
+    capacity: +document.getElementById('capacityInput').value,
+    days: +document.getElementById('daysSelect').value,
+    dates: [],
+    demands0: [],
+    demands: [],
+    frames: [],
+    playing: false,
+    frameIdx: 0,
+  };
+
+  function initData() {
+    const cap = state.capacity;
+    const days = state.days;
+    state.dates = makeSequentialDates(days);
+    state.demands0 = genRandomDemands(days, cap);
+    state.demands  = state.demands0.slice();
+    state.frames = [state.demands0.slice()];
+    state.frameIdx = 0;
+  }
+
+  function scales() {
+    const yMax = Math.max(d3.max(state.demands), state.capacity) * 1.25;
+    const x = d3.scaleBand().domain(state.dates).range([0, innerW]).padding(0.18);
+    const y = d3.scaleLinear().domain([0, yMax]).range([innerH, 0]).nice();
+    return { x, y };
+  }
+
+  function drawAxes(x, y) {
+    const xAxis = d3.axisBottom(x).tickFormat(d => fmtDate(d)).tickSizeOuter(0);
+    const yAxis = d3.axisLeft(y).ticks(6).tickSizeOuter(0);
+    xAxisG.transition().duration(TRANSITION_MS).call(xAxis);
+    yAxisG.transition().duration(TRANSITION_MS).call(yAxis);
+
+    const yTicks = y.ticks(6);
+    const lines = gridG.selectAll('line').data(yTicks, d => d);
+    lines.join(
+      enter => enter.append('line')
+        .attr('x1', 0).attr('x2', innerW)
+        .attr('y1', d => y(d)).attr('y2', d => y(d))
+        .attr('stroke', 'var(--grid)')
+        .attr('opacity', 0)
+        .call(enter => enter.transition().duration(TRANSITION_MS).attr('opacity', 1)),
+      update => update.transition().duration(TRANSITION_MS).attr('y1', d => y(d)).attr('y2', d => y(d)),
+      exit => exit.transition().duration(300).attr('opacity', 0).remove()
+    );
+  }
+
+  function drawCapacity(x, y) {
+    const yCap = y(state.capacity);
+    const line = capacityG.selectAll('line.capacity').data([state.capacity]);
+    line.join(
+      enter => enter.append('line')
+        .attr('class', 'capacity')
+        .attr('x1', -16).attr('x2', -16)
+        .attr('y1', yCap).attr('y2', yCap)
+        .attr('stroke', 'var(--line)').attr('stroke-width', 2.5).attr('stroke-dasharray', '6,6')
+        .call(enter => enter.transition().duration(700).attr('x1', 0).attr('x2', innerW)),
+      update => update.transition().duration(TRANSITION_MS).attr('y1', yCap).attr('y2', yCap).attr('x2', innerW)
+    );
+
+    const label = capacityG.selectAll('text.capacity-label').data([state.capacity]);
+    label.join(
+      enter => enter.append('text')
+        .attr('class', 'capacity-label')
+        .attr('x', innerW - 4).attr('y', yCap - 6).attr('text-anchor', 'end')
+        .attr('opacity', 0)
+        .text(() => `OPC capacity = ${state.capacity.toFixed(0)}`)
+        .call(enter => enter.transition().duration(700).attr('opacity', 1)),
+      update => update.transition().duration(TRANSITION_MS).attr('y', yCap - 6).text(() => `OPC capacity = ${state.capacity.toFixed(0)}`)
+    );
+  }
+
+  function drawBars(x, y) {
+    const bw = x.bandwidth();
+    const data = state.dates.map((d, i) => ({ date: d, value: state.demands[i], idx: i }));
+
+    const sel = barsG.selectAll('rect.bar').data(data, d => d.idx);
+    sel.join(
+      enter => enter.append('rect')
+        .attr('class', 'bar')
+        .attr('x', d => x(d.date))
+        .attr('width', bw)
+        .attr('y', y(0))
+        .attr('height', innerH - y(0))
+        .attr('rx', 6)
+        .attr('fill', d => d.value > state.capacity ? 'var(--barHigh)' : 'var(--barLow)')
+        .on('mousemove', (event, d) => showTooltip(event, d))
+        .on('mouseleave', hideTooltip)
+        .call(enter => enter.transition().duration(700)
+          .attr('y', d => y(d.value))
+          .attr('height', d => innerH - y(d.value))),
+      update => update
+        .on('mousemove', (event, d) => showTooltip(event, d))
+        .on('mouseleave', hideTooltip)
+        .transition().duration(TRANSITION_MS)
+        .attr('x', d => x(d.date))
+        .attr('width', bw)
+        .attr('y', d => y(d.value))
+        .attr('height', d => innerH - y(d.value))
+        .attr('fill', d => d.value > state.capacity ? 'var(--barHigh)' : 'var(--barLow)'),
+      exit => exit.transition().duration(300).attr('opacity', 0).remove()
+    );
+  }
+
+  function showTooltip(event, d) {
+    const [mx, my] = d3.pointer(event);
+    tooltip.style('opacity', 1)
+      .style('left', (event.pageX) + 'px')
+      .style('top', (event.pageY - 24) + 'px')
+      .html(`<b>${fmtDate(d.date)}</b><br/>Demand: <b>${d.value.toFixed(1)}</b><br/>Delta: ${(d.value - state.capacity >= 0 ? '+' : '') + (d.value - state.capacity).toFixed(1)}`);
+  }
+  function hideTooltip(){ tooltip.style('opacity', 0); }
+
+  function render() {
+    const { x, y } = scales();
+    drawAxes(x, y);
+    drawCapacity(x, y);
+    drawBars(x, y);
+  }
+
+  function play() {
+    if (state.playing) return;
+    state.playing = true;
+    d3.select('#status').text('Status: balancing…');
+
+    // Scale to ensure Total = capacity × days for a perfect flat line
+    const target = state.capacity * state.days;
+    const total  = d3.sum(state.demands);
+    if (Math.abs(total - target) > 1e-6 && total > 0) {
+      state.demands = state.demands.map(v => v * target / total);
+    }
+
+    state.frames = makeFrames(state.demands, state.capacity, STEPS);
+
+    let idx = 0;
+    function step() {
+      if (!state.playing) return;
+      if (idx >= state.frames.length) { state.playing = false; d3.select('#status').text('Status: done'); return; }
+      state.demands = state.frames[idx].slice();
+      state.frameIdx = idx;
+      render();
+      idx++;
+      setTimeout(step, TRANSITION_MS * 0.9);
+    }
+    step();
+  }
+
+  function reset() {
+    state.demands = state.demands0.slice();
+    state.playing = false;
+    state.frameIdx = 0;
+    d3.select('#status').text('Status: reset');
+    render();
+  }
+
+  function randomize() {
+    state.capacity = +document.getElementById('capacityInput').value || state.capacity;
+    state.days = +document.getElementById('daysSelect').value || state.days;
+    initData();
+    d3.select('#status').text('Status: generated new random demand');
+    render();
+  }
+
+  document.getElementById('btnRandom').addEventListener('click', () => { randomize(); });
+  document.getElementById('btnPlay').addEventListener('click', () => { play(); });
+  document.getElementById('btnReset').addEventListener('click', () => { reset(); });
+  document.getElementById('capacityInput').addEventListener('change', (e) => {
+    state.capacity = +e.target.value || state.capacity;
+    if (!state.playing) render();
+  });
+  document.getElementById('daysSelect').addEventListener('change', () => {
+    randomize();
+  });
+
+  randomize();
+  </script></body>
+</html>

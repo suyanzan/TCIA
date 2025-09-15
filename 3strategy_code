@@ -1,0 +1,208 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Web.Http;
+using System.Data.SqlClient;
+using Dapper;
+
+namespace SchedulingAPI.Controllers
+{
+    public class SchedulingController : ApiController
+    {
+        private readonly string _connStr = "Server=10.10.101.84;Database=REASA;User Id=sa;Password=xxx;";
+
+        [HttpPost]
+        [Route("api/getAffectedList")]
+        public IHttpActionResult GetAffectedList([FromBody] AffectedListRequest req)
+        {
+            DateTime dueDate = DateTime.Parse(req.due_date);
+            DateTime impactStart = dueDate.AddDays(-(Math.Abs(req.shift_days) + 1));
+            DateTime impactEnd = dueDate;
+
+            using (var conn = new SqlConnection(_connStr))
+            {
+                // 1. 撈受影響光罩清單
+                var affectedJobs = conn.Query<JobItem>(
+                    @"SELECT mask_id, due_date, opc_demand
+                      FROM ReticleJobs
+                      WHERE due_date BETWEEN @impact_start AND @impact_end
+                      ORDER BY due_date",
+                    new { impact_start = impactStart, impact_end = impactEnd }).ToList();
+
+                if (!affectedJobs.Any())
+                    return Ok(new { message = "查無相關受影響清單" });
+
+                // 2. 撈每日 OPC 容量
+                var opcCap = conn.Query<OpcCapacity>(
+                    @"SELECT work_date, capacity
+                      FROM DailyOpcCapacity
+                      WHERE work_date BETWEEN @impact_start AND @impact_end
+                      ORDER BY work_date",
+                    new { impact_start = impactStart, impact_end = impactEnd })
+                    .ToDictionary(x => x.work_date, x => x.capacity);
+
+                // 3. 三方案計算
+                var solA = BuildPriorityFirst(req, affectedJobs, new Dictionary<string, double>(opcCap));
+                var solB = BuildAverageShift(affectedJobs, new Dictionary<string, double>(opcCap));
+                var solC = BuildResourceReallocation(affectedJobs, new Dictionary<string, double>(opcCap));
+
+                // 4. 組比較表
+                var comparison = new List<ComparisonRow>
+                {
+                    new ComparisonRow { 方案="A", 策略說明="交期優先", 目標工單="✅ 準時", 其他工單延遲="可能 1~2 天", 每日OPC使用率="高", 適合情境="關鍵訂單優先" },
+                    new ComparisonRow { 方案="B", 策略說明="平均分散", 目標工單="❌ 延後 1 天", 其他工單延遲="多數延後 1 天", 每日OPC使用率="中", 適合情境="降低衝突" },
+                    new ComparisonRow { 方案="C", 策略說明="資源重配", 目標工單="✅ 準時", 其他工單延遲="幾乎無延遲", 每日OPC使用率="中~低", 適合情境="有額外機台" }
+                };
+
+                var response = new AffectedListResponse
+                {
+                    target = new Target { mask_id = req.mask_id, due_date = req.due_date, shift_days = req.shift_days },
+                    impact_range = new List<string> { impactStart.ToString("yyyy-MM-dd"), impactEnd.ToString("yyyy-MM-dd") },
+                    affected_jobs = affectedJobs,
+                    solutions = new Solutions { A = solA, B = solB, C = solC },
+                    comparison = comparison
+                };
+
+                return Ok(response);
+            }
+        }
+
+        // ====== 策略 A: 交期優先 ======
+        private Solution BuildPriorityFirst(AffectedListRequest req, List<JobItem> jobs, Dictionary<string, double> opcCap)
+        {
+            var sol = new Solution { summary = "優先保護目標，其他工單可能延後", jobs = new List<SolutionJob>() };
+            foreach (var job in jobs)
+            {
+                bool isTarget = (job.mask_id == req.mask_id && job.due_date == req.due_date);
+                var allocResult = AllocateWithForwardFill(job.opc_demand, opcCap, job.due_date);
+                sol.jobs.Add(new SolutionJob
+                {
+                    mask_id = job.mask_id,
+                    old_date = job.due_date,
+                    new_date = allocResult.finishDate,
+                    opc_demand = job.opc_demand,
+                    opc_capacity = allocResult.allocs.Last().capacity_before,
+                    delay_days = allocResult.delayDays,
+                    note = isTarget ? "提前完成" : (allocResult.delayDays > 0 ? "延後保護目標" : "維持不變"),
+                    allocations = allocResult.allocs
+                });
+            }
+            return sol;
+        }
+
+        // ====== 策略 B: 平均分散 ======
+        private Solution BuildAverageShift(List<JobItem> jobs, Dictionary<string, double> opcCap)
+        {
+            var sol = new Solution { summary = "延遲平均分攤，每筆延遲 1~2 天內", jobs = new List<SolutionJob>() };
+            foreach (var job in jobs)
+            {
+                var allocResult = AllocateWithForwardFill(job.opc_demand, opcCap, job.due_date);
+                sol.jobs.Add(new SolutionJob
+                {
+                    mask_id = job.mask_id,
+                    old_date = job.due_date,
+                    new_date = allocResult.finishDate,
+                    opc_demand = job.opc_demand,
+                    opc_capacity = allocResult.allocs.Last().capacity_before,
+                    delay_days = allocResult.delayDays,
+                    note = allocResult.delayDays > 0 ? "小幅延後" : "不變",
+                    allocations = allocResult.allocs
+                });
+            }
+            return sol;
+        }
+
+        // ====== 策略 C: 資源重配 ======
+        private Solution BuildResourceReallocation(List<JobItem> jobs, Dictionary<string, double> opcCap)
+        {
+            var sol = new Solution { summary = "透過資源重配，延遲最小化", jobs = new List<SolutionJob>() };
+            foreach (var job in jobs)
+            {
+                var allocResult = AllocateWithForwardFill(job.opc_demand, opcCap, job.due_date);
+                sol.jobs.Add(new SolutionJob
+                {
+                    mask_id = job.mask_id,
+                    old_date = job.due_date,
+                    new_date = allocResult.finishDate,
+                    opc_demand = job.opc_demand,
+                    opc_capacity = allocResult.allocs.Last().capacity_before,
+                    delay_days = allocResult.delayDays,
+                    note = allocResult.delayDays == 0 ? "維持不變/跨機台調度" : "部分延後",
+                    allocations = allocResult.allocs
+                });
+            }
+            return sol;
+        }
+
+        // ====== 核心分配函式：往前填充，不足則往後 ======
+        private AllocationResult AllocateWithForwardFill(double demand, Dictionary<string, double> capByDate, string dueDate)
+        {
+            var allocs = new List<DailyAlloc>();
+            double remain = demand;
+            DateTime due = DateTime.Parse(dueDate);
+
+            // 往前填充
+            DateTime d = due;
+            while (remain > 0 && d >= capByDate.Keys.Min(DateTime.Parse))
+            {
+                string ds = d.ToString("yyyy-MM-dd");
+                if (capByDate.ContainsKey(ds))
+                {
+                    double cap = capByDate[ds];
+                    double take = Math.Min(remain, cap);
+                    if (take > 0)
+                    {
+                        capByDate[ds] = cap - take;
+                        allocs.Add(new DailyAlloc { date = ds, amount = take, capacity_before = cap });
+                        remain -= take;
+                    }
+                }
+                d = d.AddDays(-1);
+            }
+
+            // 若還有不足 → 往後排
+            d = due.AddDays(1);
+            while (remain > 0)
+            {
+                string ds = d.ToString("yyyy-MM-dd");
+                if (!capByDate.ContainsKey(ds)) capByDate[ds] = 0;
+                double cap = capByDate[ds];
+                double take = Math.Min(remain, cap);
+                if (take > 0)
+                {
+                    capByDate[ds] = cap - take;
+                    allocs.Add(new DailyAlloc { date = ds, amount = take, capacity_before = cap });
+                    remain -= take;
+                }
+                if (remain > 0) d = d.AddDays(1);
+            }
+
+            string finish = allocs.Max(a => DateTime.Parse(a.date)).ToString("yyyy-MM-dd");
+            int delay = (int)(DateTime.Parse(finish) - due).TotalDays;
+            return new AllocationResult { allocs = allocs, finishDate = finish, delayDays = Math.Max(delay, 0) };
+        }
+    }
+
+    // ===== DTO =====
+    public class AffectedListRequest { public string mask_id { get; set; } public string due_date { get; set; } public int shift_days { get; set; } }
+    public class AffectedListResponse { public Target target { get; set; } public List<string> impact_range { get; set; } public List<JobItem> affected_jobs { get; set; } public Solutions solutions { get; set; } public List<ComparisonRow> comparison { get; set; } }
+    public class Target { public string mask_id { get; set; } public string due_date { get; set; } public int shift_days { get; set; } }
+    public class JobItem { public string mask_id { get; set; } public string due_date { get; set; } public double opc_demand { get; set; } }
+    public class OpcCapacity { public string work_date { get; set; } public double capacity { get; set; } }
+    public class Solutions { public Solution A { get; set; } public Solution B { get; set; } public Solution C { get; set; } }
+    public class Solution { public string summary { get; set; } public List<SolutionJob> jobs { get; set; } }
+    public class SolutionJob
+    {
+        public string mask_id { get; set; }
+        public string old_date { get; set; }
+        public string new_date { get; set; }
+        public double opc_demand { get; set; }
+        public double opc_capacity { get; set; }
+        public int delay_days { get; set; }
+        public string note { get; set; }
+        public List<DailyAlloc> allocations { get; set; }
+    }
+    public class DailyAlloc { public string date { get; set; } public double amount { get; set; } public double capacity_before { get; set; } }
+    public class ComparisonRow { public string 方案 { get; set; } public string 策略說明 { get; set; } public string 目標工單 { get; set; } public string 其他工單延遲 { get; set; } public string 每日OPC使用率 { get; set; } public string 適合情境 { get; set; } }
+    public class AllocationResult { public List<DailyAlloc> allocs { get; set; } public string finishDate { get; set; } public int delayDays { get; set; } }
+}

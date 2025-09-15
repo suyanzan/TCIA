@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <title>多方案光罩交期比較 - 大螢幕展示</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body { font-family: "Microsoft JhengHei", sans-serif; background:#fdfdfd; }
+    .chart-container { display: flex; gap: 20px; justify-content: center; }
+    .chart-box {
+      width: 600px; height: 500px;
+      border: 2px solid #666; padding: 15px;
+      border-radius: 12px; box-shadow: 4px 4px 10px #aaa;
+      background-color: #fafafa;
+    }
+    svg { display: block; margin: auto; }
+    .subtitle {
+      text-align: center; font-size: 18px; color: #333;
+      margin-top: 15px; font-weight: 500;
+    }
+    .conclusion {
+      margin-top: 40px; text-align: center;
+      font-size: 22px; line-height: 1.8;
+    }
+    .good { color: green; font-weight: bold; }
+    .warning { color: darkorange; font-weight: bold; }
+    .bad { color: red; font-weight: bold; }
+  </style>
+</head>
+<body>
+
+<h1 style="text-align:center; font-size:32px; margin:20px 0;">多方案光罩交期影響比較</h1>
+
+<div class="chart-container">
+  <div class="chart-box" id="chartA"></div>
+  <div class="chart-box" id="chartB"></div>
+  <div class="chart-box" id="chartC"></div>
+</div>
+
+<div id="conclusion" class="conclusion"></div>
+
+<script>
+// === 模擬後端 JSON ===
+const scenarios = {
+  "方案A": [
+    {maskId:"AJH3-AR60A1", delay:0},   // 保護目標光罩
+    {maskId:"F496-AR70B2", delay:2},
+    {maskId:"B217-AR80C3", delay:3}
+  ],
+  "方案B": [
+    {maskId:"AJH3-AR60A1", delay:1},   // 目標光罩延後 1 天
+    {maskId:"F496-AR70B2", delay:0},
+    {maskId:"B217-AR80C3", delay:0}
+  ],
+  "方案C": [
+    {maskId:"AJH3-AR60A1", delay:0},   // 全部準時
+    {maskId:"F496-AR70B2", delay:0},
+    {maskId:"B217-AR80C3", delay:0}
+  ]
+};
+
+const width = 560, height = 400, margin = {top:60,right:40,bottom:100,left:80};
+
+function drawChart(containerId, title, data, subtitle, type){
+  const box = d3.select(containerId);
+  const svg = box.append("svg").attr("width", width).attr("height", height);
+
+  const x = d3.scaleBand()
+    .domain(data.map(d=>d.maskId))
+    .range([margin.left, width-margin.right])
+    .padding(0.3);
+
+  const y = d3.scaleLinear()
+    .domain([0, d3.max(data,d=>d.delay)+1])
+    .range([height-margin.bottom, margin.top]);
+
+  const bars = svg.selectAll("rect")
+    .data(data)
+    .enter()
+    .append("rect")
+    .attr("x", d=>x(d.maskId))
+    .attr("y", d=>y(d.delay))
+    .attr("width", x.bandwidth())
+    .attr("height", d=>y(0)-y(d.delay))
+    .attr("fill", d=>d.delay===0 ? "green" : "red");
+
+  // 數字標籤
+  svg.selectAll("text.delayLabel")
+    .data(data)
+    .enter()
+    .append("text")
+    .attr("x", d=>x(d.maskId)+x.bandwidth()/2)
+    .attr("y", d=>y(d.delay)-10)
+    .attr("text-anchor","middle")
+    .style("font-size","16px")
+    .style("font-weight","bold")
+    .style("fill", d=>d.delay>0 ? "red" : "green")
+    .text(d=> d.delay>0 ? `+${d.delay}天` : "準時");
+
+  // X 軸
+  svg.append("g")
+    .attr("transform",`translate(0,${height-margin.bottom})`)
+    .call(d3.axisBottom(x))
+    .selectAll("text")
+    .style("text-anchor","end")
+    .style("font-size","18px")
+    .attr("transform","rotate(-45)")
+    .attr("dx","-0.8em")
+    .attr("dy","0.15em");
+
+  // Y 軸
+  svg.append("g")
+    .attr("transform",`translate(${margin.left},0)`)
+    .call(d3.axisLeft(y).ticks(6))
+    .selectAll("text")
+    .style("font-size","16px");
+
+  // Y 軸標題
+  svg.append("text")
+    .attr("transform","rotate(-90)")
+    .attr("x", -height/2)
+    .attr("y", 25)
+    .attr("text-anchor","middle")
+    .style("font-size","18px")
+    .text("遞延天數");
+
+  // 圖表標題
+  svg.append("text")
+    .attr("x", width/2)
+    .attr("y", margin.top/2)
+    .attr("text-anchor","middle")
+    .style("font-size","20px")
+    .style("font-weight","bold")
+    .text(title);
+
+  // 子標題
+  box.append("div")
+    .attr("class","subtitle")
+    .html(subtitle);
+
+  // === 特效 ===
+  if(type==="A"){ 
+    bars.filter(d=>d.delay>0)
+      .transition().duration(500).attr("x", d=>x(d.maskId)-4)
+      .transition().duration(500).attr("x", d=>x(d.maskId))
+      .on("end", function repeat(){ 
+        d3.select(this).transition().duration(500).attr("x", x(d3.select(this).datum().maskId)-4)
+        .transition().duration(500).attr("x", x(d3.select(this).datum().maskId))
+        .on("end", repeat);
+      });
+  }
+  else if(type==="B"){
+    // 目標光罩閃爍
+    const targetBar = bars.filter(d=>d.maskId==="AJH3-AR60A1");
+    function blink(){
+      targetBar.transition().duration(600).attr("fill","darkred")
+        .transition().duration(600).attr("fill","red")
+        .on("end", blink);
+    }
+    blink();
+  }
+  else if(type==="C"){
+  // 全部準時，加黑框
+  bars.attr("stroke","black").attr("stroke-width",2);
+
+  // 額外顯示 OPC 成本資訊
+  box.append("div")
+    .style("margin-top","10px")
+    .style("text-align","center")
+    .style("color","darkred")
+    .style("font-weight","bold")
+    .style("font-size","18px")
+    .text("需額外 OPC 成本：增加 1111 月投放增量");
+
+  // === 錢飛走效果 (群組) ===
+  function spawnMoneyGroup(){
+    for(let i=0;i<5;i++){   // 一次生成 5 個
+      const startX = width/2 + (Math.random()*80 - 40);  // 左右隨機
+      const delay = i * 200; // 依序飛走
+      
+      const money = svg.append("text")
+        .attr("x", startX)
+        .attr("y", height - margin.bottom - 30)
+        .attr("text-anchor","middle")
+        .style("font-size","50px")
+        .text("💸")
+        .style("opacity",1);
+
+      money.transition()
+        .delay(delay)
+        .duration(2500 + Math.random()*1000)
+        .attr("y", margin.top + Math.random()*50)  // 高度隨機
+        .attr("x", startX + (Math.random()*100 - 50)) // 左右偏移
+        .style("opacity",0)
+        .remove();
+    }
+
+    // 每 3 秒再生成一批
+    setTimeout(spawnMoneyGroup, 3000);
+  }
+  spawnMoneyGroup();
+}
+}
+
+// 畫三張圖
+drawChart("#chartA","方案A", scenarios["方案A"], "保護目標光罩 → 其他光罩最多延遲 2~3 天","A");
+drawChart("#chartB","方案B", scenarios["方案B"], "目標光罩延遲 1 天 → 其他光罩均準時","B");
+drawChart("#chartC","方案C", scenarios["方案C"], "全部準時 → 但需額外 OPC 成本","C");
+
+// === 結論區塊 ===
+d3.select("#conclusion").html(`
+  <div>⚠️ <b>方案A</b>：<span style="color:blue; font-weight:bold; text-decoration:underline;">目標光罩零延遲</span>，但<span style="color:red; font-weight:bold;">其他光罩延遲較多</span>。</div>
+  <div>⚠️ <b>方案B</b>：<span style="color:red; font-weight:bold;">目標光罩延遲 1 天</span>，但<span style="color:blue; font-weight:bold; text-decoration:underline;">大多數光罩不受影響</span>。</div>
+  <div>⚠️ <b>方案C</b>：<span style="color:blue; font-weight:bold; text-decoration:underline;">所有光罩準時</span>，但需額外花費 <span style="color:red; font-weight:bold;">OPC 量產成本</span>。</div>
+  <div style="margin-top:20px; font-size:24px; color:blue; font-weight:bold;">
+    → GenAI 工具提供多方案比較，依照策略選擇最適合的方案。
+  </div>
+`);
+</script>
+
+</body>
+</html>

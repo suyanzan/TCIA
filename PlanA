@@ -1,0 +1,91 @@
+// ====== 策略 A: 交期優先 (提前開跑) ======
+private Solution BuildPriorityFirst(AffectedListRequest req, List<JobItem> jobs, Dictionary<string, double> opcCap, int advanceDays = 2)
+{
+    var sol = new Solution { summary = $"優先保護目標(提前{advanceDays}天)，其他工單可能延後", jobs = new List<SolutionJob>() };
+
+    // 1. 先找目標工單
+    var target = jobs.FirstOrDefault(j => j.mask_id == req.mask_id && j.due_date == req.due_date);
+    if (target != null)
+    {
+        DateTime due = DateTime.Parse(target.due_date);
+        DateTime startDate = due.AddDays(-advanceDays);
+
+        // 分配：固定視窗 (startDate ~ dueDate)
+        var targetAlloc = AllocateFixedWindow(target.opc_demand, opcCap, startDate, due);
+
+        sol.jobs.Add(new SolutionJob
+        {
+            mask_id = target.mask_id,
+            old_date = target.due_date,
+            new_date = targetAlloc.finishDate,
+            opc_demand = target.opc_demand,
+            opc_capacity = targetAlloc.allocs.Last().capacity_before,
+            delay_days = 0,
+            note = $"提前至{startDate:yyyy-MM-dd}開跑，{due:yyyy-MM-dd}準時完成",
+            allocations = targetAlloc.allocs
+        });
+    }
+
+    // 2. 其他工單：用剩餘容量往後補
+    foreach (var job in jobs.Where(j => !(j.mask_id == req.mask_id && j.due_date == req.due_date)))
+    {
+        var allocResult = AllocateWithForwardFill(job.opc_demand, opcCap, job.due_date);
+        sol.jobs.Add(new SolutionJob
+        {
+            mask_id = job.mask_id,
+            old_date = job.due_date,
+            new_date = allocResult.finishDate,
+            opc_demand = job.opc_demand,
+            opc_capacity = allocResult.allocs.Last().capacity_before,
+            delay_days = allocResult.delayDays,
+            note = allocResult.delayDays > 0 ? "延後保護目標" : "維持不變",
+            allocations = allocResult.allocs
+        });
+    }
+
+    return sol;
+}
+
+// ====== 新增: 固定視窗分配 (提前開跑) ======
+private AllocationResult AllocateFixedWindow(double demand, Dictionary<string, double> capByDate, DateTime startDate, DateTime endDate)
+{
+    var allocs = new List<DailyAlloc>();
+    double remain = demand;
+    DateTime cursor = startDate;
+
+    // 先在 start ~ end 分配
+    for (var d = startDate; d <= endDate && remain > 0; d = d.AddDays(1))
+    {
+        string ds = d.ToString("yyyy-MM-dd");
+        if (!capByDate.ContainsKey(ds)) continue;
+
+        double cap = capByDate[ds];
+        double take = Math.Min(remain, cap);
+        if (take > 0)
+        {
+            capByDate[ds] = cap - take;
+            allocs.Add(new DailyAlloc { date = ds, amount = take, capacity_before = cap });
+            remain -= take;
+        }
+    }
+
+    // 如果還不足，就繼續往後補
+    DateTime after = endDate.AddDays(1);
+    while (remain > 0)
+    {
+        string ds = after.ToString("yyyy-MM-dd");
+        if (!capByDate.ContainsKey(ds)) capByDate[ds] = 0;
+        double cap = capByDate[ds];
+        double take = Math.Min(remain, cap);
+        if (take > 0)
+        {
+            capByDate[ds] = cap - take;
+            allocs.Add(new DailyAlloc { date = ds, amount = take, capacity_before = cap });
+            remain -= take;
+        }
+        if (remain > 0) after = after.AddDays(1);
+    }
+
+    string finish = allocs.Max(a => DateTime.Parse(a.date)).ToString("yyyy-MM-dd");
+    return new AllocationResult { allocs = allocs, finishDate = finish, delayDays = 0 };
+}

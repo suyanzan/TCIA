@@ -1,0 +1,707 @@
+﻿@model DashboardNew.Models.DashboardViewModel
+@using System.Web.Script.Serialization
+@{
+    var serializer = new JavaScriptSerializer();
+    var scenariosJson = serializer.Serialize(Model.Scenarios);
+    var comparisonJson = serializer.Serialize(Model.Comparison);
+    var delayListsJson = serializer.Serialize(Model.DelayLists);
+    var targetMask = Model.TargetMaskId;
+    var dailyCapacityCheckJson = serializer.Serialize(Model.DailyCapacityCheck);// ✅ 加這行
+    // 👉 新增
+    var targetJobJson = serializer.Serialize(Model.ExtraInfo.TargetJob);
+    var maxDayInfoJson = serializer.Serialize(Model.ExtraInfo.MaxDayInfo);
+    var opcDemandJson = serializer.Serialize(Model.OpcDemandList);
+}
+@{
+    Layout = null;
+}
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8" />
+    <title>多方案光罩交期影響比較</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+
+    <style>
+        body {
+            font-family: "Microsoft JhengHei", sans-serif;
+            background: #fdfdfd;
+        }
+
+        .chart-container {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            align-items: flex-start;
+        }
+
+        .chart-box {
+            width: 600px;
+            border: 2px solid #666;
+            padding: 15px;
+            border-radius: 12px;
+            background: #fafafa;
+        }
+
+        .subtitle {
+            text-align: center;
+            font-size: 18px;
+            margin-top: 10px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            font-size: 14px;
+        }
+
+        th, td {
+            border: 1px solid #aaa;
+            padding: 6px;
+            text-align: center;
+        }
+
+        th {
+            background: #eee;
+        }
+
+        .accordion-header {
+            margin-top: 8px;
+            padding: 6px;
+            background: #ddd;
+            cursor: pointer;
+            text-align: center;
+            font-weight: bold;
+            border-radius: 6px;
+        }
+
+        .accordion-content {
+            display: none;
+        }
+
+        .conclusion {
+            margin-top: 40px;
+        }
+
+        .card-container {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+        }
+
+        .card {
+            flex: 1;
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+            transition: transform 0.3s ease;
+        }
+
+            .card:hover {
+                transform: scale(1.05);
+            }
+
+        .card-title {
+            font-size: 22px;
+            font-weight: bold;
+            z-index: 2;
+            position: relative;
+        }
+
+        .card-body {
+            margin-top: 10px;
+            font-size: 22px;   /* 原本 16px → 改大 */
+            z-index: 2;
+            position: relative;
+            line-height: 1.6;  /* 字行距加大，排版更清楚 */
+        }
+
+        .card-bg {
+            position: absolute;
+            right: 10px;
+            bottom: 10px;
+            font-size: 60px;
+            opacity: 0.15;
+        }
+
+        .highlight {
+            color: red;
+            font-weight: bold;
+        }
+
+        .download-btn {
+            padding: 12px 25px;
+            background: #28a745;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            font-size: 20px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+            .download-btn:hover {
+                transform: scale(1.1);
+                background: #218838;
+            }
+
+            .download-btn:active {
+                animation: flash 0.4s;
+            }
+        /* ⚠️ Razor 衝突修正：這裡要寫 @@keyframes */
+        @@keyframes flash {
+            0% {
+                background: #28a745;
+            }
+
+            50% {
+                background: #ffc107;
+            }
+
+            100% {
+                background: #28a745;
+            }
+        }
+
+        #dashboardWrapper {
+            width: 1200px;
+            min-height: 1600px;
+            background: #fff;
+            margin: 0 auto; /* 水平置中 */
+        }
+    </style>
+</head>
+<body>
+    <h1 id="page-title" style="text-align:center; font-size:32px; margin:20px 0;"></h1>
+    <div id="dashboardWrapper" style="width:1200px; min-height:1600px; background:#fff;">
+        <!-- 你的三個圖表 + 結論區塊 -->
+        <div class="chart-container">
+            <div class="chart-box" id="chartA"></div>
+            <div class="chart-box" id="chartB"></div>
+            <div class="chart-box" id="chartC"></div>
+        </div>
+
+        <div id="conclusion" class="conclusion"></div>
+    </div>
+    <script>
+           const targetMask = "@targetMask"; // 目標光罩從後端帶過來
+            const scenarios = @Html.Raw(scenariosJson);
+            const comparison = @Html.Raw(comparisonJson);
+            const delayLists = @Html.Raw(delayListsJson);
+            const dailyCapacityCheck = @Html.Raw(dailyCapacityCheckJson);
+            const width = 560, height = 300, margin = {top:60,right:40,bottom:100,left:80};
+            const targetJob = @Html.Raw(targetJobJson);
+            const maxDayInfo = @Html.Raw(maxDayInfoJson);
+            const opcDemandList = @Html.Raw(opcDemandJson);
+            function drawChart(containerId, title, color, data,datadelaylist, subtitle, type){
+                const box = d3.select(containerId);
+                const svg = box.append("svg").attr("width", width).attr("height", height);
+
+                // 取目標光罩 + 另外兩筆
+                const target = data.find(d => d.maskId === targetMask); // ✅ 改成後端帶來的 targetMask
+                let others;
+                //if (type === "C") { // C 案，全部準時
+                //    others = data.filter(d => d.maskId !== targetMask).slice(0, 2);
+                //} else { // A/B 案，取延遲最嚴重的兩筆
+                //    others = data.filter(d => d.maskId !== targetMask)
+                //                 .sort((a, b) => b.delay - a.delay)
+                //                 .slice(0, 2);
+                //}
+                const chartData =scenarios[title];
+                // Y 軸：方案 C 顯示「需求量」，A/B 顯示「遞延天數」
+                let yMax;
+                if (type === "C") {
+                    yMax = d3.max(chartData, d => d.delay) * 1.2;  // delay = max_demand_value
+                } else {
+                    yMax = d3.max(chartData, d => d.delay) + 1;
+                }
+                const x = d3.scaleBand().domain(chartData.map(d=>d.maskId)).range([margin.left, width-margin.right]).padding(0.3);
+                const y = d3.scaleLinear().domain([0, d3.max(chartData,d=>d.delay)+1]).range([height-margin.bottom, margin.top]);
+
+
+
+                const bars = svg.selectAll("rect").data(chartData).enter().append("rect")
+                  .attr("x", d=>x(d.maskId))
+                  .attr("y", d=>y(d.delay))
+                  .attr("width", x.bandwidth())
+                  .attr("height", d=>y(0)-y(d.delay))
+                  .attr("fill", d => {
+                        if (type === "C") return "steelblue";  // C 用藍色
+                        return d.delay === 0 ? "green" : "red";
+                   });
+
+                // bar 上方文字
+                svg.selectAll("text.delayLabel").data(chartData).enter().append("text")
+                  .attr("x", d=>x(d.maskId)+x.bandwidth()/2)
+                  .attr("y", d=>y(d.delay)-8)
+                  .attr("text-anchor","middle")
+                  .style("font-size","14px")
+                  .style("fill", d=>d.delay>0?"red":"green")
+                  .text(d => {
+                        if (type === "C") return d.maskId === targetMask ? "準時" : `需求 ${d.delay}`;
+                        return d.delay > 0 ? `+${d.delay}` : "✔";
+                  });
+
+                // X 軸
+                svg.append("g").attr("transform",`translate(0,${height-margin.bottom+10})`)
+                  .call(d3.axisBottom(x))
+                  .selectAll("text").style("font-size","14px").attr("dy","1.5em");
+
+                svg.append("text").attr("x", width/2).attr("y", height-5)
+                  .attr("text-anchor","middle").style("font-size","16px").text("光罩編號/需求日");
+
+                // Y 軸
+                svg.append("g").attr("transform",`translate(${margin.left},0)`)
+                  .call(d3.axisLeft(y).ticks(6))
+                  .selectAll("text").style("font-size","14px");
+
+                svg.append("text").attr("transform","rotate(-90)")
+                  .attr("x",-height/2).attr("y",20)
+                  .attr("text-anchor","middle").style("font-size","16px").text("遞延天數");
+
+                // 標題
+                svg.append("text").attr("x", width/2).attr("y", margin.top/2)
+                  .attr("text-anchor","middle").style("font-size","20px").style("font-weight","bold").style("fill",color)
+                  .text(title);
+
+                box.append("div").attr("class","subtitle").html(subtitle);
+                // 延遲清單表格 (加徽章)
+                let table = `<table><tr><th>光罩編號/日期</th><th>狀態</th><th>${type==="C" ? "需求量" : "遞延天數"}</th></tr>`;
+
+                if (type === "C") {
+                         // C 案 → 每日需求 vs 可用容量
+                        table = `<table><tr><th>日期</th><th>需求量</th><th>可用容量</th><th>狀態</th></tr>`;
+                        dailyCapacityCheck.forEach(d => {
+                            table += `<tr>
+                        <td>${d.date}</td>
+                        <td style="color:${d.gap > 0 ? 'red':'green'};">${d.demand}</td>
+                        <td>${d.capacity}</td>
+                        <td>${d.status}</td>
+                      </tr>`;
+                        });
+                        table += "</table>";
+
+                        // 找出最大需求日 (gap 最大)
+                        const worst = dailyCapacityCheck.reduce((a, b) => (a.gap > b.gap ? a : b));
+                        box.append("div").style("color", "red").style("font-weight", "bold")
+                           .text(`最大需求日：${worst.date} (缺口 ${worst.gap})`);
+                     } else {
+                                const list = delayLists[title];
+                                list.forEach(d => {
+                                    const badge = d.delay_days > 0 ? "❌ 延遲" : "✅ 準時";
+                                    table += `<tr>
+                        <td>${d.mask_id}</td>
+                        <td>${badge}</td>
+                        <td style="color:${d.delay_days > 0 ? 'red' : 'green'};">${d.delay_days}</td>
+                    </tr>`;
+                    });
+                }
+
+                table += "</table>";
+                // 收折區塊
+                const accId = `acc_${containerId.replace('#','')}`;
+                $(containerId).append(`
+                      <div class="accordion-header" data-target="${accId}">📋 ${title} 清單 ▼</div>
+                      <div id="${accId}" class="accordion-content">${table}</div>
+                    `);
+                    $(`[data-target=${accId}]`).on("click", function(){
+                        $(`#${accId}`).slideToggle();
+                })
+
+                // 特效
+                if(type==="A"){ // 晃動
+                    bars.filter(d=>d.delay>0)
+                      .transition().duration(500).attr("x", d=>x(d.maskId)-4)
+                      .transition().duration(500).attr("x", d=>x(d.maskId))
+                      .on("end", function repeat(){
+                          d3.select(this).transition().duration(500).attr("x", x(d3.select(this).datum().maskId)-4)
+                          .transition().duration(500).attr("x", x(d3.select(this).datum().maskId))
+                          .on("end", repeat);
+                      });
+                }
+                else if(type==="B"){ // 閃爍
+                    const targetBar = bars.filter(d=>d.maskId === targetMask);
+                    function blink(){
+                        targetBar.transition().duration(600).attr("fill","darkred")
+                          .transition().duration(600).attr("fill","red")
+                          .on("end", blink);
+                    }
+                    blink();
+                }
+                else if(type==="C"){ // 錢飛走
+                    bars.attr("stroke","black").attr("stroke-width",2);
+                    function spawnMoneyGroup(){
+                        for(let i=0;i<5;i++){
+                            const money = svg.append("text")
+                              .attr("x", width/2 + (Math.random()*100-50))
+                              .attr("y", height-margin.bottom-30)
+                              .attr("text-anchor","middle")
+                              .style("font-size","60px")
+                              .text("💸")
+                              .style("opacity",1);
+                            money.transition()
+                              .delay(i*200).duration(3000)
+                              .attr("y", margin.top + Math.random()*50)
+                              .attr("x", width/2 + (Math.random()*120-60))
+                              .style("opacity",0).remove();
+                        }
+                        setTimeout(spawnMoneyGroup, 3000);
+                    }
+                    spawnMoneyGroup();
+                }
+            }
+            // 不再做 sort/filter，只用後端給的資料
+            document.getElementById("page-title").innerText =
+            targetMask + " 多方案光罩交期影響比較";
+            const dataA = scenarios["方案A"]; // 已經是 目標 + top2
+            const dataB = scenarios["方案B"]; // 已經是 目標 + low2
+            const dataC = scenarios["方案C"]; // 全部 or C案需求
+            // 畫三張圖
+            drawChart("#chartA","方案A","blue", scenarios["方案A"],dataA, "目標光罩守住 ✅ → 其他光罩搖搖欲墜","A");
+            drawChart("#chartB","方案B","orange", scenarios["方案B"],dataB, "大家分攤 ⚖️ → 目標光罩也得等一下","B");
+            // 🟢 方案C 改用 drawChartC
+            drawChartC("#chartC", "方案C", "green", targetJob, [maxDayInfo], "全部準時 🎉 → 但要花錢 💸");
+
+            // === 結論卡片式 + 大師秘笈按鈕 ===
+            let html = `<div class="card-container">`;
+
+            comparison.forEach(c=>{
+                if(c.strategy==="A"){
+                    html += `
+                  <div class="card" style="border:2px solid #007BFF; background:#f0f8ff;">
+                    <div class="card-title" style="color:#007BFF;">🚀 方案A</div>
+                    <div class="card-body">
+                      <span style="color:blue;">目標光罩(${targetMask}) 零延遲</span><br/>
+                      其他光罩累積 <span class="highlight">${c.total_delay_days} 天</span> 遞延
+                    </div>
+                    <div class="card-bg">⚙️</div>
+                  </div>`;
+                }
+                else if(c.strategy==="B"){
+                    html += `
+                  <div class="card" style="border:2px solid #FF8C00; background:#fff8f0;">
+                    <div class="card-title" style="color:#FF8C00;">⚖️ 方案B</div>
+                    <div class="card-body">
+                      大家一起分攤<br/>
+                      目標光罩(${targetMask}) 也延遲<br/>
+                      平均遞延 <span class="highlight">${c.avg_delay_days.toFixed(1)} 天</span>
+                    </div>
+                    <div class="card-bg">⚖️</div>
+                  </div>`;
+                }
+                else if(c.strategy==="C"){
+                    html += `
+                  <div class="card" style="border:2px solid #28a745; background:#f0fff5;">
+                    <div class="card-title" style="color:#28a745;">💡 方案C</div>
+                    <div class="card-body">
+                      全部準時 🎉<br/>
+                      額外成本 <span class="highlight">${c.max_gap}<br/>
+                      <span style="font-size:24px;">📈 月投放增量 +${c.max_gap}</span>
+                    </div>
+                    <div class="card-bg">💰</div>
+                  </div>`;
+                }
+            });
+
+            html += `</div>`;
+
+            // 總結說明 + 按鈕
+            html += `
+            <div style="margin-top:30px; font-size:24px; color:blue; font-weight:bold; line-height:1.6; text-align:center;">
+              <div>
+                👉 <u>OPC 排程決策輔助大師</u> 幫你比較三種策略：
+                <br>🚀 守住關鍵、⚖️ 平均分攤、💡 額外資源全準時
+                <br>請依照你的 <span style="color:red;">優先需求</span>，挑選最合適的一招！
+              </div>
+                <button onclick="exportToPpt()" class="download-btn">📑 大師秘笈</button>
+            </div>`;
+            document.getElementById("conclusion").innerHTML = html;
+
+
+            function exportFullHtml() {
+                let wrapperClone = document.querySelector("#dashboardWrapper").cloneNode(true);
+
+                // 移除所有 D3.js script，保留當下渲染好的 SVG/表格
+                wrapperClone.querySelectorAll("script").forEach(el => el.remove());
+
+                let htmlContent = ''
+                  + '<!DOCTYPE html>'
+                  + '<html lang="zh-TW">'
+                  + '<head>'
+                  + '<meta charset="UTF-8" />'
+                  + '<title>大師秘笈_光罩交期比較_靜態版</title>'
+                  + '<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css"/>'
+                  + '<style>'
+                  + 'body { font-family:"Microsoft JhengHei",sans-serif; background:#fdfdfd; }'
+                  + '.chart-container { display:flex; gap:20px; justify-content:center; align-items:flex-start; }'
+                  + '.chart-box { width:600px; border:2px solid #666; padding:15px; border-radius:12px; background:#fafafa; }'
+                  + '.subtitle { text-align:center; font-size:18px; margin-top:10px; }'
+                  + 'table { width:100%; border-collapse:collapse; margin-top:10px; font-size:14px; }'
+                  + 'th, td { border:1px solid #aaa; padding:6px; text-align:center; }'
+                  + 'th { background:#eee; }'
+                  + '.card-container { display:flex; gap:20px; justify-content:center; margin-top:20px; }'
+                  + '.card { flex:1; border:2px solid #ccc; border-radius:10px; padding:20px; text-align:center; }'
+                  + '.card-title { font-size:22px; font-weight:bold; }'
+                  + '.card-body { margin-top:10px; font-size:16px; }'
+                  + '.highlight { color:red; font-weight:bold; }'
+                  + '</style>'
+                  + '</head>'
+                  + '<body>'
+                  + '<h1 style="text-align:center; font-size:32px; margin:20px 0;">多方案光罩交期影響比較</h1>'
+                  + '<div id="dashboardWrapper">' + wrapperClone.innerHTML + '</div>'
+                  + '</body></html>';
+                let blob = new Blob([htmlContent], { type: "text/html;charset=utf-8" });
+                //let link = document.createElement("a");
+                //link.href = URL.createObjectURL(blob);
+                //link.download = "大師秘笈_光罩交期比較_靜態版.html";
+                //link.click();
+                @*$.ajax({
+                    url: '@Url.Action("ExportHtmlToPpt","Dashboard")',
+                    type: "POST",
+                    data: JSON.stringify({ HtmlContent: htmlContent }),
+                    contentType: "application/json",
+                    xhrFields: { responseType: 'blob' },
+                    success: function(blob){
+                        let link = document.createElement('a');
+                        link.href = window.URL.createObjectURL(blob);
+                        link.download = "大師秘笈_光罩交期比較.pptx";
+                        link.click();
+                    }
+                });*@
+            }
+
+            function getPng(selector) {
+                let el = document.querySelector(selector);
+                return html2canvas(el, { scale: 3, useCORS: true, logging: false }).then(canvas => {
+                    return canvas.toDataURL("image/png", 1.0); // 1.0 = PNG 無壓縮
+                });
+            }
+
+            //function exportToPpt() {
+            //  Promise.all([
+            //    getPng("#chartA"),
+            //    getPng("#chartB"),
+            //    getPng("#chartC"),
+            //    getPng("#conclusion")
+            //  ]).then(([imgA, imgB, imgC, imgConclusion]) => {
+            //    $.ajax({
+            //      url: '/Dashboard/ExportPptWithLayout',
+            //      type: "POST",
+            //      data: JSON.stringify({
+            //        A: imgA,
+            //        B: imgB,
+            //        C: imgC,
+            //        Conclusion: imgConclusion
+            //      }),
+            //      contentType: "application/json",
+            //      xhrFields: { responseType: 'blob' },
+            //      success: function (blob) {
+            //        let link = document.createElement('a');
+            //        link.href = window.URL.createObjectURL(blob);
+            //        link.download = "大師秘笈_光罩交期比較.pptx";
+            //        link.click();
+            //      }
+            //    });
+            //  });
+        //}
+            function exportToPpt() {
+              Promise.all([
+                getPng("#chartA"),
+                getPng("#chartB"),
+                getPng("#chartC"),
+                getPng("#conclusion")
+              ]).then(([imgA, imgB, imgC, imgConclusion]) => {
+                $.ajax({
+                  url: '/Dashboard/ExportPptWithLayout',
+                  type: "POST",
+                  data: JSON.stringify({
+                    A: imgA,
+                    B: imgB,
+                    C: imgC,
+                    Conclusion: imgConclusion
+                  }),
+                  contentType: "application/json",
+                  xhrFields: { responseType: 'blob' },
+                  success: function (blob) {
+                    let link = document.createElement('a');
+                    link.href = window.URL.createObjectURL(blob);
+                    link.download = "大師秘笈_光罩交期比較.pptx";
+                    link.click();
+                  }
+                });
+              });
+        }
+
+            window.onload = function() {
+                let htmlDelay = "";
+                for (var key in delayLists) {
+                    if (!delayLists.hasOwnProperty(key)) continue;
+
+                    htmlDelay += `<h2>${key} 延遲清單</h2>
+                      <table>
+                        <tr><th>光罩編號</th><th>狀態</th><th>遞延天數</th></tr>`;
+                    delayLists[key].forEach(d => {
+                        const badge = d.delay_days > 0 ? "❌ 延遲" : "✅ 準時";
+                        htmlDelay += `<tr>
+                            <td>${d.mask_id}</td>
+                            <td>${badge}</td>
+                            <td style="color:${d.delay_days > 0 ? 'red' : 'green'}">${d.delay_days}</td>
+                          </tr>`;
+                    });
+                    htmlDelay += `</table>`;
+                }
+                document.getElementById("delay-lists").innerHTML = htmlDelay;
+            };
+            function drawChartC(containerId, title, color, targetJob, dailyCapacityCheck, subtitle) {
+                const box = d3.select(containerId);
+                const svg = box.append("svg").attr("width", width).attr("height", height);
+
+                // 只取目標光罩 + 最大需求日
+                const maxDay = dailyCapacityCheck.reduce((prev, curr) => curr.gap > prev.gap ? curr : prev, dailyCapacityCheck[0]);
+                const chartData = [
+                    { label: targetJob.mask_id, value: 0, note: "準時" },
+                    { label: `最大需求日:${maxDay.date}`, demand: maxDay.demand, capacity: maxDay.capacity, gap: maxDay.gap }
+                ];
+
+                const x = d3.scaleBand().domain(chartData.map(d => d.label))
+                            .range([margin.left, width - margin.right]).padding(0.3);
+                const y = d3.scaleLinear().domain([0, d3.max(chartData, d => (d.demand || d.gap || 0) + d.capacity) + 500])
+                            .range([height - margin.bottom, margin.top]);
+
+                // Bar 畫法
+                chartData.forEach(d => {
+                    if (d.label === targetJob.mask_id) {
+                        // 綠色準時
+                        svg.append("rect")
+                           .attr("x", x(d.label))
+                           .attr("y", y(0))
+                           .attr("width", x.bandwidth())
+                           .attr("height", 0)
+                           .attr("fill", "green")
+                           .transition().duration(600)
+                           .attr("y", y(1)).attr("height", y(0) - y(1));
+
+                        svg.append("text")
+                           .attr("x", x(d.label) + x.bandwidth() / 2)
+                           .attr("y", y(1) - 8)
+                           .attr("text-anchor", "middle")
+                           .style("font-size", "14px").style("fill", "green")
+                           .text("準時");
+                    } else {
+                        // 藍色容量
+                        svg.append("rect")
+                           .attr("x", x(d.label))
+                           .attr("y", y(d.capacity))
+                           .attr("width", x.bandwidth())
+                           .attr("height", y(0) - y(d.capacity))
+                           .attr("fill", "steelblue").attr("stroke", "black");
+
+                        // 紅色缺口 (gap)
+                        if (d.gap > 0) {
+                            svg.append("rect")
+                               .attr("x", x(d.label))
+                               .attr("y", y(d.capacity + d.gap))
+                               .attr("width", x.bandwidth())
+                               .attr("height", y(d.capacity) - y(d.capacity + d.gap))
+                               .attr("fill", "red").attr("stroke", "black");
+
+                            svg.append("text")
+                               .attr("x", x(d.label) + x.bandwidth() / 2)
+                               .attr("y", y(d.capacity + d.gap) - 8)
+                               .attr("text-anchor", "middle")
+                               .style("font-size", "14px").style("fill", "red")
+                               .text(`缺口 ${d.gap}`);
+                        }
+                    }
+                });
+
+                // X 軸
+                svg.append("g").attr("transform", `translate(0,${height - margin.bottom})`)
+                   .call(d3.axisBottom(x))
+                   .selectAll("text").style("font-size", "14px").attr("dy", "1.5em");
+
+                svg.append("text").attr("x", width / 2).attr("y", height - 5)
+                   .attr("text-anchor", "middle").style("font-size", "16px").text("光罩編號 / 日期");
+
+                // Y 軸
+                svg.append("g").attr("transform", `translate(${margin.left},0)`)
+                   .call(d3.axisLeft(y).ticks(6))
+                   .selectAll("text").style("font-size", "14px");
+
+                svg.append("text").attr("transform", "rotate(-90)")
+                   .attr("x", -height / 2).attr("y", 20)
+                   .attr("text-anchor", "middle").style("font-size", "16px").text("OPC 需求量");
+
+                // 標題
+                svg.append("text").attr("x", width / 2).attr("y", margin.top / 2)
+                   .attr("text-anchor", "middle").style("font-size", "20px").style("font-weight", "bold").style("fill", color)
+                   .text(title);
+
+                // 副標題
+                box.append("div").attr("class", "subtitle").html(subtitle);
+
+                // 📋 表格
+                let table = `<table>
+                   <tr><th>日期</th><th>狀態</th><th>缺口</th></tr>`;
+                // 在 C 方案表格用 opcDemandList
+                //dailyCapacityCheck.forEach(d => {
+                //    table += `<tr>
+                //    <td>${d.date}</td>
+                //    <td>${d.demand}</td>
+                //    <td>${d.capacity}</td>
+                //    <td style="color:${d.status === '溢位' ? 'red' : 'green'};">${d.status}</td>
+                //    <td style="color:${d.gap > 0 ? 'red' : 'green'};">${d.gap}</td>
+                //  </tr>`;
+                //});
+                opcDemandList.forEach(d => {
+                    const badge = d.status === "溢位" ? "❌ 溢位" : "✅ 充足";
+                    table += `<tr>
+                <td>${d.date}</td>
+                <td>${badge}</td>
+                <td style="color:${d.status==="溢位"?'red':'green'};">${d.demand} / ${d.capacity} (缺口 ${d.gap})</td>
+              </tr>`;
+                });
+                table += "</table>";
+
+                const accId = `acc_${containerId.replace('#','')}`;
+                $(containerId).append(`
+                <div class="accordion-header" data-target="${accId}">📋 ${title} OPC需求清單 ▼</div>
+                <div id="${accId}" class="accordion-content">${table}</div>
+             `);
+                $(`[data-target=${accId}]`).on("click", function () {
+                    $(`#${accId}`).slideToggle();
+                });
+
+                // 💸 飛錢特效
+                function spawnMoneyGroup() {
+                    for (let i = 0; i < 5; i++) {
+                        const money = svg.append("text")
+                            .attr("x", width / 2 + (Math.random() * 100 - 50))
+                            .attr("y", height - margin.bottom - 30)
+                            .attr("text-anchor", "middle")
+                            .style("font-size", "60px")
+                            .text("💸")
+                            .style("opacity", 1);
+                        money.transition()
+                            .delay(i * 200).duration(3000)
+                            .attr("y", margin.top + Math.random() * 50)
+                            .attr("x", width / 2 + (Math.random() * 120 - 60))
+                            .style("opacity", 0).remove();
+                    }
+                    setTimeout(spawnMoneyGroup, 3000);
+                }
+                spawnMoneyGroup();
+            }
+    </script>
+    <div id="delay-lists" style="margin-top:30px;"></div>
+</body>
+</html>
+
+
+

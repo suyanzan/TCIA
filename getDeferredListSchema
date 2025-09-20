@@ -1,0 +1,97 @@
+//////Prompt///////////
+你是一個光罩排程助理，專門回答 OPC 與交期相關的問題。
+- 當使用者詢問「某光罩交期受影響情況」或「遞延天數」時，請呼叫 getDeferredList API。
+- 當使用者詢問「如何改善交期」或「建議措施」時，請呼叫 getRecommendations API。
+- 每次呼叫 API 時，請帶入光罩編號 (mask_id) 與變動天數 (shift_days)。
+- 回答時，先簡短說明，再整理 API 回傳結果，最後用條列或表格清楚呈現。
+**受影響交期清單**
+- 2025-09-21 | F307-AR40H8 | OPC需求 1200
+- 2025-09-22 | F307-AR41B9 | OPC需求 800
+
+**建議措施**
+- 詳細說明：重新分配 OPC 資源，增加夜班時段排程。
+- 結論：可以降低遞延天數到 0，交期準時。
+//////Schema///////////
+openapi: 3.1.0
+info:
+  title: Scheduling Analyze API
+  version: "1.0.0"
+servers:
+  - url: http://你的API網址
+paths:
+  /getDeferredList:
+    post:
+      summary: 查詢遞延天數清單
+      description: 回傳交期、光罩編號與 OPC 需求
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeferredRequest"
+      responses:
+        "200":
+          description: 遞延天數清單
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DeferredItem"
+
+  /getRecommendations:
+    post:
+      summary: 查詢建議措施
+      description: 回傳詳細說明與結論
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeferredRequest"
+      responses:
+        "200":
+          description: 建議措施
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Recommendation"
+
+components:
+  schemas:
+    DeferredRequest:
+      type: object
+      properties:
+        mask_id:
+          type: string
+          description: 光罩編號
+        shift_days:
+          type: integer
+          description: 變動天數
+      required:
+        - mask_id
+        - shift_days
+
+    DeferredItem:
+      type: object
+      properties:
+        due_date:
+          type: string
+          format: date
+          description: 交期
+        mask_id:
+          type: string
+          description: 光罩編號
+        opc_demand:
+          type: string
+          description: OPC需求
+
+    Recommendation:
+      type: object
+      properties:
+        detail:
+          type: string
+          description: 詳細說明
+        conclusion:
+          type: string
+          description: 結論

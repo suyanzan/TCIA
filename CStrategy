@@ -1,0 +1,71 @@
+// 步驟1: 建立初始產能狀態（複製原始產能，避免修改原始數據）
+var adjustedCapacity = new Dictionary<DateTime, int>(opcCap);
+
+// 步驟2: 按日期順序處理，實現往前填滿邏輯
+var sortedDemands = demandPerDay.OrderBy(kv => kv.Key).ToList();
+
+foreach (var currentDay in sortedDemands)
+{
+    DateTime date = currentDay.Key;
+    int demand = currentDay.Value;
+    int currentCap = adjustedCapacity.ContainsKey(date) ? adjustedCapacity[date] : 0;
+    
+    // 如果當日有缺口，嘗試從前面的日期借用
+    if (demand > currentCap)
+    {
+        int needed = demand - currentCap;
+        
+        // 從前面的日期開始找剩余產能
+        foreach (var prevDay in sortedDemands.Where(d => d.Key < date))
+        {
+            DateTime prevDate = prevDay.Key;
+            int prevDemand = prevDay.Value;
+            int prevCap = adjustedCapacity.ContainsKey(prevDate) ? adjustedCapacity[prevDate] : 0;
+            
+            // 計算前一天的剩余產能
+            int surplus = prevCap - prevDemand;
+            if (surplus > 0)
+            {
+                // 計算可以借用的數量
+                int canBorrow = Math.Min(surplus, needed);
+                
+                // 調整產能分配
+                adjustedCapacity[prevDate] -= canBorrow;
+                adjustedCapacity[date] = adjustedCapacity.GetValueOrDefault(date, 0) + canBorrow;
+                
+                needed -= canBorrow;
+                
+                // 如果已經補滿，跳出循環
+                if (needed <= 0) break;
+            }
+        }
+    }
+}
+
+// 步驟3: 基於調整後的產能計算最終缺口
+sol.dailyCapacityCheck = demandPerDay.Select(kv =>
+{
+    int adjustedCap = adjustedCapacity.ContainsKey(kv.Key) ? adjustedCapacity[kv.Key] : 0;
+    int gap = kv.Value - adjustedCap;
+    string status = gap > 0 ? "溢位" : "充足";
+    if (gap > 0) sol.extra_opc_needed += gap;
+    
+    return new DailyCapacityInfo
+    {
+        date = kv.Key,
+        demand = kv.Value,
+        capacity = adjustedCap, // 使用調整後的產能
+        status = status,
+        gap = gap
+    };
+}).ToList();
+
+// 步驟4: 找出調整後的最大需求日
+var worst = sol.dailyCapacityCheck.OrderByDescending(d => d.gap).FirstOrDefault();
+if (worst != null)
+{
+    sol.maxDemandDay = worst.date;
+    sol.maxGap = worst.gap;
+}
+
+return sol;
